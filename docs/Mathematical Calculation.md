@@ -19,23 +19,9 @@ $$
 20 \log_{10}\left(\frac{|y[n]|}{\max|y|}\right) > -20.
 $$
 
-### 1.3 Fixed-Length Padding/Cropping
-- Target $N_{\text{target}} = 16000 \times 3 = 48000$ samples.
-- If $\text{len}(y) < N_{\text{target}}$:
-
-$$
-y_{\text{padded}}[n] = \begin{cases}
-  y[n], & n < N \\ 
-  0, & n \ge N
-\end{cases}
-$$
-
-- If $\text{len}(y) > N_{\text{target}}$:
-
-$$
-\text{start} = \left\lfloor\frac{\text{len}(y) - N_{\text{target}}}{2}\right\rfloor,\qquad
-y_{\text{cropped}}[n] = y[\text{start} + n].
-$$
+### 1.3 Variable-Length Processing
+- Supports audio up to 60 seconds (960,000 samples at 16kHz).
+- The pipeline pads shorter sequences or truncates longer sequences to a maximum length, allowing for variable-length $T$ in the subsequent steps.
 
 ### 1.4 Mel Spectrogram Computation
 - STFT parameters: $N_{\text{FFT}} = 1024$, $\text{HOP\_LENGTH} = 512$, window = Hann.
@@ -101,30 +87,30 @@ S_{\text{dB}}[m, t] - \mu, & \sigma = 0
 \end{cases}
 $$
 
-### 1.7 Spatial Resizing (ResNet path)
-- Input shape: $(128, T)$.
-- Target shape: $(224, 224)$ via bilinear interpolation.
-- Output shape after preprocessing: $(1, 224, 224)$.
+### 1.7 ResNet Path (Spatial)
+- Input shape: $(128, T)$ where $T$ varies based on sequence length.
+- Output shape after adding channel dim: $(1, 128, T)$.
+- Adaptive pooling allows processing this variable shape.
 
-### 1.8 Temporal Sequence (LSTM path)
-- Input shape: $(128, T)$ where $T = 1 + \lfloor 48000 / 512 \rfloor = 94$.
-- Transpose to time-major: $(T, 128) = (94, 128)$.
+### 1.8 LSTM Path (Temporal)
+- Input shape: $(128, T)$.
+- Transpose to time-major: $(T, 128)$.
 - No resizing — preserves original temporal resolution.
 
 ## 2. ResNet-18 Model Mathematics
 
 ### 2.1 Input/Output
-- Input tensor: $x \in \mathbb{R}^{1 \times 224 \times 224}$.
+- Input tensor: $x \in \mathbb{R}^{1 \times 128 \times T}$.
 - Output logits: $\mathrm{logits} \in \mathbb{R}^{2}$ (Real vs AI).
 
 ### 2.2 Feature Extraction Layers
 
 #### 2.2.1 Conv1 + BatchNorm + ReLU + MaxPool
 - Conv1 weights: $W_1 \in \mathbb{R}^{64 \times 1 \times 7 \times 7}$, stride $=2$, padding $=3$.
-- Output dims:
+- Output spatial dims are halved:
 
 $$
-\text{out} = \left\lfloor\frac{224 + 2\cdot3 - 7}{2} \right\rfloor + 1 = 112.
+\text{out}_H = \left\lfloor\frac{128 + 2\cdot3 - 7}{2} \right\rfloor + 1 = 64, \quad \text{out}_W = \left\lfloor\frac{T + 2\cdot3 - 7}{2} \right\rfloor + 1 \approx T/2
 $$
 
 - BatchNorm:
@@ -139,10 +125,10 @@ $$
 a_1 = \max(0, \hat{f}).
 $$
 
-- MaxPool1 ($3\times3$, stride $=2$, padding $=1$): output dims $56 \times 56$.
+- MaxPool1 ($3\times3$, stride $=2$, padding $=1$): output dims $32 \times T/4$.
 
 #### 2.2.2 Conv2_x block (no downsample)
-- Input dims: $64 \times 56 \times 56$.
+- Input dims: $64 \times 32 \times T/4$.
 - Two conv layers, each $3 \times 3$, 64 filters, stride $=1$, padding $=1$.
 - Residual path:
 
@@ -155,25 +141,25 @@ $$
 $$
 
 #### 2.2.3 Conv3_x block (downsample)
-- Input dims: $64 \times 56 \times 56$.
-- Main path first conv: 128 filters, stride $=2$ $\to$ $128 \times 28 \times 28$.
+- Input dims: $64 \times 32 \times T/4$.
+- Main path first conv: 128 filters, stride $=2$ $\to$ $128 \times 16 \times T/8$.
 - Shortcut path: 1x1 conv, $64 \to 128$, stride $=2$.
-- Output after addition and ReLU: $128 \times 28 \times 28$.
+- Output after addition and ReLU: $128 \times 16 \times T/8$.
 
 #### 2.2.4 Conv4_x block (downsample)
-- Input dims: $128 \times 28 \times 28$.
-- Main path output: $256 \times 14 \times 14$.
+- Input dims: $128 \times 16 \times T/8$.
+- Main path output: $256 \times 8 \times T/16$.
 - Shortcut: 1x1 conv, $128 \to 256$, stride $=2$.
 
 #### 2.2.5 Conv5_x block (downsample)
-- Input dims: $256 \times 14 \times 14$.
-- Main path output: $512 \times 7 \times 7$.
+- Input dims: $256 \times 8 \times T/16$.
+- Main path output: $512 \times 4 \times T/32$.
 - Shortcut: 1x1 conv, $256 \to 512$, stride $=2$.
 
 ### 2.3 Global Average Pooling
 
 $$
-g[c] = \frac{1}{7 \times 7} \sum_{i=1}^{7} \sum_{j=1}^{7} a_{\text{res4}}[c, i, j].
+g[c] = \frac{1}{4 \times T/32} \sum_{i=1}^{4} \sum_{j=1}^{T/32} a_{\text{res4}}[c, i, j].
 $$
 
 Output: $g \in \mathbb{R}^{512}$.
@@ -188,7 +174,7 @@ $$
 ## 3. LSTM Model Mathematics
 
 ### 3.1 Input/Output
-- Input tensor: $x \in \mathbb{R}^{T \times D}$ where $T = 94$ (time steps), $D = 128$ (mel bands).
+- Input tensor: $x \in \mathbb{R}^{T \times D}$ where $T$ varies (time steps), $D = 128$ (mel bands).
 - Output logits: $\mathrm{logits} \in \mathbb{R}^{2}$ (Real vs AI).
 
 ### 3.2 LSTM Cell Equations
@@ -259,13 +245,22 @@ With $L = 2$ layers:
 - Layer 2 output: $h_t^{(2)} \in \mathbb{R}^{256}$
 - Dropout ($p = 0.3$) applied between layers.
 
-### 3.5 Classifier Head
+### 3.5 Attention Pooling & Classifier Head
 
-Takes the last time step output $h_T^{(2)}$ and passes through:
+Instead of taking the last time step, computes an attention-weighted sum over all time steps:
 
 $$
 \begin{aligned}
-  a_1 &= \text{Dropout}(h_T^{(2)}), & & a_1 \in \mathbb{R}^{256} \\
+  \alpha_t &= \text{Softmax}(\text{AttentionNetwork}(h_t^{(2)})), \\
+  c &= \sum_{t=1}^T \alpha_t h_t^{(2)}, & & c \in \mathbb{R}^{256}
+\end{aligned}
+$$
+
+Then passes the context vector $c$ through the classifier:
+
+$$
+\begin{aligned}
+  a_1 &= \text{Dropout}(c), & & a_1 \in \mathbb{R}^{256} \\
   a_2 &= \text{ReLU}(W_1 a_1 + b_1), & & a_2 \in \mathbb{R}^{64} \\
   a_3 &= \text{Dropout}(a_2), & & a_3 \in \mathbb{R}^{64} \\
   \mathrm{logits}_{\text{lstm}} &= W_2 a_3 + b_2, & & \mathrm{logits} \in \mathbb{R}^{2}
@@ -361,7 +356,7 @@ $$
 \text{confidence} = \max_{i} p_i.
 $$
 
-- Class label mapping: $0 \to$ Real, $1 \to$ AI Generated.
+- Class label mapping: $0 \to$ Real, $1 \to$ Spoofed.
 
 ## 7. Ensemble Mathematics
 

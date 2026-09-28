@@ -96,10 +96,10 @@ function App() {
             </div>
             <h1 className="mt-4 text-2xl md:text-3xl font-semibold text-slate-50 tracking-tight flex items-center gap-2">
               <Waves className="h-7 w-7 text-sky-400" />
-              AI-Generated &amp; Tampered Audio Detection
+              AI-Generated Audio Detection
             </h1>
             <p className="mt-2 text-sm md:text-base text-slate-300 max-w-2xl">
-              Upload a short audio clip to analyze mel-spectrogram features with a
+              Upload an audio clip (up to 60 seconds) to analyze mel-spectrogram features with a
               ResNet-18 + LSTM ensemble and estimate whether it is real human speech or AI-generated.
             </p>
           </div>

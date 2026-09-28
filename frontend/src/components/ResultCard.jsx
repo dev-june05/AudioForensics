@@ -1,5 +1,5 @@
 import React, { useEffect, useRef } from 'react';
-import { Activity, CheckCircle2, AlertTriangle, Brain, Cpu, Layers } from 'lucide-react';
+import { Activity, CheckCircle2, AlertTriangle, HelpCircle, Brain, Cpu, Layers } from 'lucide-react';
 import { gsap } from 'gsap';
 
 /* ---------------------------------------------------------------
@@ -12,6 +12,7 @@ function PredictionCard({ icon: Icon, title, tag, prediction, confidence, accent
     prediction.toLowerCase().includes('real');
 
   const isNA = prediction === 'N/A';
+  const isUncertain = prediction === 'Uncertain';
 
   return (
     <div className="rounded-xl border border-slate-700/70 bg-slate-900/60 p-3 space-y-2">
@@ -30,19 +31,23 @@ function PredictionCard({ icon: Icon, title, tag, prediction, confidence, accent
       {prediction && !isNA ? (
         <div
           className={`flex items-center gap-2 rounded-lg px-2.5 py-2 border ${
-            isReal
-              ? 'border-emerald-500/50 bg-emerald-950/30'
-              : 'border-amber-400/50 bg-amber-950/30'
+            isUncertain
+              ? 'border-slate-500/50 bg-slate-800/30'
+              : isReal
+                ? 'border-emerald-500/50 bg-emerald-950/30'
+                : 'border-amber-400/50 bg-amber-950/30'
           }`}
         >
-          {isReal ? (
+          {isUncertain ? (
+            <HelpCircle className="h-4 w-4 text-slate-400 shrink-0" />
+          ) : isReal ? (
             <CheckCircle2 className="h-4 w-4 text-emerald-400 shrink-0" />
           ) : (
             <AlertTriangle className="h-4 w-4 text-amber-300 shrink-0" />
           )}
           <div>
             <p className="text-[11px] font-medium text-slate-100 uppercase tracking-wide">
-              {isReal ? 'Real human speech' : 'AI-generated / tampered'}
+              {isUncertain ? 'Uncertain — low confidence' : isReal ? 'Real human speech' : 'AI-generated audio'}
             </p>
             <p className="text-[10px] text-slate-300">
               Output: <span className="font-semibold">{prediction}</span>
@@ -66,9 +71,11 @@ function PredictionCard({ icon: Icon, title, tag, prediction, confidence, accent
           <div className="h-1.5 w-full rounded-full bg-slate-800 overflow-hidden">
             <div
               className={`h-1.5 rounded-full bg-gradient-to-r ${
-                isReal
-                  ? 'from-emerald-400 via-emerald-300 to-cyan-300'
-                  : 'from-amber-400 via-orange-300 to-rose-400'
+                isUncertain
+                  ? 'from-slate-500 via-slate-400 to-slate-300'
+                  : isReal
+                    ? 'from-emerald-400 via-emerald-300 to-cyan-300'
+                    : 'from-amber-400 via-orange-300 to-rose-400'
               }`}
               style={{ width: `${Math.min(Math.max(confidence * 100, 4), 100)}%` }}
             />
@@ -162,7 +169,13 @@ function ResultCard({ result, loading }) {
           </div>
 
           <p className="text-[10px] text-slate-500 px-1">
-            Ensemble prediction uses weighted averaging of softmax probabilities from both models.
+            Ensemble uses weighted averaging of softmax probabilities.
+            {result.audio_duration_sec != null && (
+              <> Analyzed {result.audio_duration_sec.toFixed(1)}s of audio.</>  
+            )}
+            {result.confidence_threshold != null && (
+              <> Predictions below {(result.confidence_threshold * 100).toFixed(0)}% confidence are marked uncertain.</>  
+            )}
           </p>
         </div>
       ) : (

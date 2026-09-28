@@ -1,65 +1,48 @@
 """
-PyTorch Dataset for real vs AI-generated audio classification.
+PyTorch Dataset for PartialSpoof audio classification.
 
-Supports two return modes controlled by the *mode* parameter:
-  - "resnet" → returns (tensor_1x224x224, label)   — mel-spectrogram image
-  - "lstm"   → returns (tensor_TxN_MELS, label)     — temporal mel sequence
-
-Directory structure expected:
-  root_dir/
-    real/   → label 0 (Real)
-    fake/   → label 1 (AI Generated / Fake)
-
-Preprocessing mirrors backend/preprocess.py exactly so that training and
-inference see the same feature distribution.
+Provides 30-second contiguous windows.
+Each window is given a binary label:
+- 1 (Fake) if ANY 0.64s segment within it is spoofed.
+- 0 (Real) otherwise.
 """
 
+import math
+import os
+import random
 from pathlib import Path
-from typing import List, Optional, Tuple
+from typing import Iterator, List, Optional, Tuple, Dict
 
 import librosa
 import numpy as np
 import torch
-import torch.nn.functional as F
 from torch.utils.data import Dataset
 
-# ---------------------------------------------------------------------------
-# Preprocessing constants (must match backend/config.py exactly)
-# ---------------------------------------------------------------------------
-
-TARGET_SR = 16_000
-TARGET_DURATION_SEC = 3.0
-TARGET_NUM_SAMPLES = int(TARGET_SR * TARGET_DURATION_SEC)
-TARGET_SIZE = 224
-N_FFT = 1024
-HOP_LENGTH = 512
-N_MELS = 128
-POWER = 2.0
-TRIM_TOP_DB = 20
-
-
-# ---------------------------------------------------------------------------
-# Shared waveform helpers
-# ---------------------------------------------------------------------------
-
-def _trim_silence(y: np.ndarray) -> np.ndarray:
-    y_trimmed, _ = librosa.effects.trim(y, top_db=TRIM_TOP_DB)
-    return y_trimmed
+import sys
+sys.path.append(str(Path(__file__).resolve().parent.parent / "backend"))
+from config import (
+    HOP_LENGTH,
+    N_FFT,
+    N_MELS,
+    POWER,
+    SAMPLE_RATE,
+    SILENCE_THRESHOLD_DB,
+    WINDOW_DURATION_SEC,
+    WINDOW_NUM_SAMPLES,
+)
 
 
-def _pad_or_crop(y: np.ndarray, target_length: int) -> np.ndarray:
-    n = len(y)
-    if n < target_length:
-        y = np.pad(y, (0, target_length - n), mode="constant", constant_values=0.0)
-    elif n > target_length:
-        start = (n - target_length) // 2
-        y = y[start : start + target_length]
+def _pad_to_window(y: np.ndarray) -> np.ndarray:
+    if len(y) < WINDOW_NUM_SAMPLES:
+        y = np.pad(y, (0, WINDOW_NUM_SAMPLES - len(y)), mode='constant')
+    elif len(y) > WINDOW_NUM_SAMPLES:
+        y = y[:WINDOW_NUM_SAMPLES]
     return y
 
 
 def _compute_mel_spectrogram(y: np.ndarray) -> np.ndarray:
     return librosa.feature.melspectrogram(
-        y=y, sr=TARGET_SR, n_fft=N_FFT, hop_length=HOP_LENGTH,
+        y=y, sr=SAMPLE_RATE, n_fft=N_FFT, hop_length=HOP_LENGTH,
         n_mels=N_MELS, power=POWER,
     )
 
@@ -76,116 +59,147 @@ def _normalize(mel_db: np.ndarray) -> np.ndarray:
     return (mel_db - mean) / std
 
 
-def _resize_tensor(tensor: torch.Tensor, h: int, w: int) -> torch.Tensor:
-    return F.interpolate(
-        tensor.unsqueeze(0), size=(h, w), mode="bilinear", align_corners=False,
-    ).squeeze(0)
+class AudioAugmentor:
+    """Waveform augmentation."""
+    def __init__(self, p: float = 0.5) -> None:
+        self.p = p
+
+    def __call__(self, y: np.ndarray, sr: int) -> np.ndarray:
+        if random.random() < self.p:
+            y = self._add_gaussian_noise(y)
+        if random.random() < self.p:
+            y = self._time_stretch(y, sr)
+        if random.random() < self.p:
+            y = self._pitch_shift(y, sr)
+        return y
+
+    @staticmethod
+    def _add_gaussian_noise(y: np.ndarray, snr_db_range: Tuple[float, float] = (10, 30)) -> np.ndarray:
+        snr_db = random.uniform(*snr_db_range)
+        signal_power = np.mean(y ** 2)
+        if signal_power <= 0:
+            return y
+        noise_power = signal_power / (10 ** (snr_db / 10))
+        noise = np.random.normal(0, np.sqrt(noise_power), len(y))
+        return (y + noise).astype(y.dtype)
+
+    @staticmethod
+    def _time_stretch(y: np.ndarray, sr: int, rate_range: Tuple[float, float] = (0.9, 1.1)) -> np.ndarray:
+        rate = random.uniform(*rate_range)
+        return librosa.effects.time_stretch(y, rate=rate)
+
+    @staticmethod
+    def _pitch_shift(y: np.ndarray, sr: int, semitone_range: Tuple[float, float] = (-2, 2)) -> np.ndarray:
+        n_steps = random.uniform(*semitone_range)
+        return librosa.effects.pitch_shift(y, sr=sr, n_steps=n_steps)
 
 
-# ---------------------------------------------------------------------------
-# Mode-specific waveform → tensor converters
-# ---------------------------------------------------------------------------
-
-def waveform_to_resnet_tensor(y: np.ndarray) -> torch.Tensor:
+class PartialSpoofDataset(Dataset):
     """
-    Convert a mono waveform at TARGET_SR to a (1, 224, 224) tensor.
-    Used by ResNet training and kept identical to backend preprocessing.
+    Dataset for PartialSpoof.
+    Splits files into fixed 30s windows.
+    Returns (tensor, label) for a single window.
     """
-    y = _trim_silence(y)
-    y = _pad_or_crop(y, TARGET_NUM_SAMPLES)
-    mel_spec = _compute_mel_spectrogram(y)
-    mel_db = _to_log_scale(mel_spec)
-    mel_norm = _normalize(mel_db)
-    tensor = torch.from_numpy(mel_norm).float().unsqueeze(0)  # (1, N_MELS, T)
-    tensor = _resize_tensor(tensor, TARGET_SIZE, TARGET_SIZE)
-    return tensor  # (1, 224, 224)
-
-
-def waveform_to_lstm_tensor(y: np.ndarray) -> torch.Tensor:
-    """
-    Convert a mono waveform at TARGET_SR to a (T, N_MELS) tensor.
-    The LSTM sees the mel-spectrogram as a time-series of N_MELS features.
-    """
-    y = _trim_silence(y)
-    y = _pad_or_crop(y, TARGET_NUM_SAMPLES)
-    mel_spec = _compute_mel_spectrogram(y)
-    mel_db = _to_log_scale(mel_spec)
-    mel_norm = _normalize(mel_db)
-    # mel_norm: (N_MELS, T) → transpose to (T, N_MELS) for the LSTM
-    return torch.from_numpy(mel_norm.T).float()  # (T, N_MELS)
-
-
-# Backward compatibility alias
-waveform_to_tensor = waveform_to_resnet_tensor
-
-
-# ---------------------------------------------------------------------------
-# Dataset class
-# ---------------------------------------------------------------------------
-
-class AudioDataset(Dataset):
-    """
-    Dataset that scans root_dir/real and root_dir/fake, returning
-    (tensor, label) pairs.
-
-    Args:
-        root_dir:  Path containing real/ and fake/ subdirectories.
-        mode:      "resnet" → (1, 224, 224) spectrogram image tensor.
-                   "lstm"   → (T, N_MELS) temporal sequence tensor.
-        real_subdir / fake_subdir: names of class subdirectories.
-        extensions: optional whitelist of file extensions.
-    """
-
-    VALID_MODES = {"resnet", "lstm"}
+    VALID_MODES = {"resnet", "lstm", "raw"}
 
     def __init__(
         self,
-        root_dir: str | Path,
+        audio_dirs: List[str | Path],
+        segment_labels_path: str | Path,
         mode: str = "resnet",
-        real_subdir: str = "real",
-        fake_subdir: str = "fake",
-        extensions: Optional[List[str]] = None,
+        augment: bool = False,
+        augment_prob: float = 0.5,
+        resolution_sec: float = 0.64,
+        file_list: Optional[List[str]] = None,
     ):
         if mode not in self.VALID_MODES:
             raise ValueError(f"mode must be one of {self.VALID_MODES}, got '{mode}'")
 
-        self.root_dir = Path(root_dir)
+        self.audio_dirs = [Path(d) for d in audio_dirs]
         self.mode = mode
-        self.samples: List[Tuple[Path, int]] = []
-        self.real_dir = self.root_dir / real_subdir
-        self.fake_dir = self.root_dir / fake_subdir
+        self.augment = augment
+        self.augmentor = AudioAugmentor(p=augment_prob) if augment else None
+        self.resolution_sec = resolution_sec
 
-        if not self.real_dir.exists():
-            raise FileNotFoundError(f"Real audio directory not found: {self.real_dir}")
-        if not self.fake_dir.exists():
-            raise FileNotFoundError(f"Fake audio directory not found: {self.fake_dir}")
+        # Load segment labels (dict mapping file_id to array of '0' and '1')
+        raw_labels = np.load(segment_labels_path, allow_pickle=True).item()
+        
+        # Filter files if file_list is provided
+        if file_list is not None:
+            allowed_ids = {Path(f).stem for f in file_list}
+            self.labels_dict = {k: v for k, v in raw_labels.items() if k in allowed_ids}
+        else:
+            self.labels_dict = raw_labels
 
-        ext_set = {e.lower() for e in (extensions or [])}
+        self.windows = []
 
-        for path in sorted(self.real_dir.iterdir()):
-            if path.is_file() and (not ext_set or path.suffix.lower() in ext_set):
-                self.samples.append((path, 0))
+        for file_id, segments in self.labels_dict.items():
+            audio_path = None
+            for d in self.audio_dirs:
+                p_wav = d / f"{file_id}.wav"
+                p_flac = d / f"{file_id}.flac"
+                if p_wav.exists():
+                    audio_path = p_wav
+                    break
+                if p_flac.exists():
+                    audio_path = p_flac
+                    break
+            
+            if audio_path is None:
+                continue
+                
+            total_duration_sec = len(segments) * self.resolution_sec
+            total_samples = int(total_duration_sec * SAMPLE_RATE)
+            
+            # Divide into 30s windows
+            for start_sample in range(0, total_samples, WINDOW_NUM_SAMPLES):
+                end_sample = min(start_sample + WINDOW_NUM_SAMPLES, total_samples)
+                
+                # Determine window label
+                start_sec = start_sample / SAMPLE_RATE
+                end_sec = end_sample / SAMPLE_RATE
+                
+                start_seg_idx = int(start_sec / self.resolution_sec)
+                end_seg_idx = int(math.ceil(end_sec / self.resolution_sec))
+                
+                window_segments = segments[start_seg_idx:end_seg_idx]
+                
+                # If ANY segment in this window is '0' (spoofed), the window is spoofed.
+                # In our training label mapping: 0 = Real, 1 = Fake
+                is_fake = any(seg == '0' for seg in window_segments)
+                window_label = 1 if is_fake else 0
+                
+                self.windows.append((audio_path, start_sample, end_sample, window_label))
 
-        for path in sorted(self.fake_dir.iterdir()):
-            if path.is_file() and (not ext_set or path.suffix.lower() in ext_set):
-                self.samples.append((path, 1))
-
-        if len(self.samples) == 0:
-            raise ValueError(
-                f"No audio files found under {self.real_dir} and {self.fake_dir}. "
-                "Check directory structure and file extensions."
-            )
+    def get_labels(self) -> List[int]:
+        return [w[3] for w in self.windows]
 
     def __len__(self) -> int:
-        return len(self.samples)
+        return len(self.windows)
 
     def __getitem__(self, idx: int) -> Tuple[torch.Tensor, int]:
-        path, label = self.samples[idx]
-        y, _ = librosa.load(path.as_posix(), sr=TARGET_SR, mono=True)
+        audio_path, start_sample, end_sample, label = self.windows[idx]
+        
+        # Load just the needed chunk
+        offset = start_sample / SAMPLE_RATE
+        duration = (end_sample - start_sample) / SAMPLE_RATE
+        y, _ = librosa.load(str(audio_path), sr=SAMPLE_RATE, offset=offset, duration=duration, mono=True)
+
+        if self.augment and self.augmentor is not None:
+            y = self.augmentor(y, SAMPLE_RATE)
+
+        y = _pad_to_window(y)
+
+        if self.mode == "raw":
+            return torch.from_numpy(y).float(), label
+
+        mel_spec = _compute_mel_spectrogram(y)
+        mel_db = _to_log_scale(mel_spec)
+        mel_norm = _normalize(mel_db)
 
         if self.mode == "lstm":
-            tensor = waveform_to_lstm_tensor(y)
+            tensor = torch.from_numpy(mel_norm.T).float()
         else:
-            tensor = waveform_to_resnet_tensor(y)
+            tensor = torch.from_numpy(mel_norm).float().unsqueeze(0)
 
         return tensor, label

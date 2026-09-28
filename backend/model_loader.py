@@ -2,7 +2,7 @@
 Dual-model loader and ensemble inference for audio deepfake detection.
 
 Manages two models:
-  1. ResNet-18  — classifies mel-spectrogram images (1, 224, 224)
+  1. ResNet-18  — classifies mel-spectrogram images (1, N_MELS, T)
   2. LSTM       — classifies temporal mel sequences  (1, T, N_MELS)
 
 At startup both .pth files are loaded into memory. The predict() function
@@ -10,12 +10,12 @@ runs both models, applies softmax, and computes a weighted ensemble.
 
 Class index convention:
   0 → Real
-  1 → AI Generated
+  1 → Spoofed
 """
 
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Optional
+from typing import Optional, List
 
 import torch
 import torch.nn as nn
@@ -23,14 +23,15 @@ from torchvision.models import resnet18
 
 from config import (
     CLASS_LABELS,
+    CONFIDENCE_THRESHOLD,
     LSTM_HIDDEN_DIM,
     LSTM_INPUT_DIM,
     LSTM_NUM_CLASSES,
     LSTM_NUM_LAYERS,
-    LSTM_WEIGHT,
     RESNET_NUM_CLASSES,
-    RESNET_WEIGHT,
+    get_ensemble_weights,
 )
+from preprocess import WindowData
 
 # ---------------------------------------------------------------------------
 # Device
@@ -47,26 +48,40 @@ _LSTM_MODEL: Optional[nn.Module] = None
 
 
 # ---------------------------------------------------------------------------
-# Result container
+# Result containers
 # ---------------------------------------------------------------------------
 
 @dataclass
-class EnsemblePrediction:
-    """All prediction outputs needed by the API response."""
-    resnet_prediction: str
-    resnet_confidence: float
-    lstm_prediction: str
-    lstm_confidence: float
-    ensemble_prediction: str
-    ensemble_confidence: float
+class WindowPrediction:
+    start_time_sec: float
+    end_time_sec: float
+    duration_sec: float
+    is_silent: bool
+    status: str  # "SILENT", "ANALYZED"
+    ai_probability: float
+    prediction: str  # "Real", "Spoofed", "Uncertain", "N/A"
+    resnet_prob: float = 0.0
+    lstm_prob: float = 0.0
+    spectrogram_base64: Optional[str] = None
 
+
+@dataclass
+class FilePrediction:
+    overall_status: str  # "NO_AUDIO", "MIXED / SUSPICIOUS", "Real", "Spoofed"
+    overall_ai_probability: float
+    total_duration_sec: float
+    windows: List[WindowPrediction]
 
 # ---------------------------------------------------------------------------
 # Architecture builders
 # ---------------------------------------------------------------------------
 
 def _build_resnet() -> nn.Module:
-    """ResNet-18: 1-channel input, 2-class output."""
+    """
+    ResNet-18: 1-channel input, 2-class output.
+    Accepts variable spatial input via AdaptiveAvgPool2d(1,1).
+    No pretrained weights at inference — architecture must match training.
+    """
     model = resnet18(weights=None)
     model.conv1 = nn.Conv2d(1, 64, kernel_size=7, stride=2, padding=3, bias=False)
     model.fc = nn.Linear(model.fc.in_features, RESNET_NUM_CLASSES)
@@ -74,7 +89,9 @@ def _build_resnet() -> nn.Module:
 
 
 class _AudioLSTM(nn.Module):
-    """Bidirectional LSTM matching training/model.py AudioLSTM."""
+    """
+    Bidirectional LSTM with attention pooling, matching training/model.py AudioLSTM.
+    """
 
     def __init__(
         self,
@@ -93,18 +110,46 @@ class _AudioLSTM(nn.Module):
             bidirectional=True,
             dropout=dropout if num_layers > 1 else 0.0,
         )
+
+        lstm_output_dim = hidden_dim * 2
+
+        # Attention mechanism (must match training/model.py)
+        self.attention = nn.Sequential(
+            nn.Linear(lstm_output_dim, 64),
+            nn.Tanh(),
+            nn.Linear(64, 1),
+        )
+
         self.classifier = nn.Sequential(
             nn.Dropout(dropout),
-            nn.Linear(hidden_dim * 2, 64),
+            nn.Linear(lstm_output_dim, 64),
             nn.ReLU(),
             nn.Dropout(dropout),
             nn.Linear(64, num_classes),
         )
 
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
+    def forward(self, x: torch.Tensor, lengths: Optional[torch.Tensor] = None) -> torch.Tensor:
         lstm_out, _ = self.lstm(x)
-        last = lstm_out[:, -1, :]
-        return self.classifier(last)
+
+        # Attention scores
+        attn_scores = self.attention(lstm_out).squeeze(-1)
+
+        # Mask padding if lengths provided
+        if lengths is not None:
+            max_len = x.size(1)
+            positions = torch.arange(max_len, device=x.device).unsqueeze(0)
+            padding_mask = positions >= lengths.unsqueeze(1)
+            attn_scores = attn_scores.masked_fill(padding_mask, float("-inf"))
+
+        attn_weights = torch.softmax(attn_scores, dim=1)
+
+        # Weighted sum
+        context = torch.bmm(
+            attn_weights.unsqueeze(1),
+            lstm_out,
+        ).squeeze(1)
+
+        return self.classifier(context)
 
 
 # ---------------------------------------------------------------------------
@@ -178,74 +223,101 @@ def models_loaded() -> dict:
 # ---------------------------------------------------------------------------
 
 @torch.inference_mode()
-def predict(
-    resnet_tensor: torch.Tensor,
-    lstm_tensor: torch.Tensor,
-) -> EnsemblePrediction:
+def predict(windows: List[WindowData]) -> FilePrediction:
     """
-    Run both models and compute the weighted ensemble prediction.
-
-    Args:
-        resnet_tensor: shape (1, 224, 224) — from preprocess_audio().
-        lstm_tensor:   shape (1, T, N_MELS) — from preprocess_audio().
-
-    Returns:
-        EnsemblePrediction with individual and ensemble results.
-
-    Raises:
-        RuntimeError: If neither model is loaded.
+    Run both models on all non-silent windows and compute a duration-weighted ensemble.
     """
-    resnet_probs = None
-    lstm_probs = None
+    if _RESNET_MODEL is None and _LSTM_MODEL is None:
+        raise RuntimeError("No models loaded. Call load_resnet() and/or load_lstm() at startup.")
 
-    # ----- ResNet inference -----
-    if _RESNET_MODEL is not None:
-        batch = resnet_tensor.unsqueeze(0).to(DEVICE)  # (1, 1, 224, 224)
-        logits = _RESNET_MODEL(batch)
-        resnet_probs = torch.softmax(logits, dim=1).squeeze(0)  # (2,)
+    window_predictions: List[WindowPrediction] = []
+    
+    total_analyzed_duration = 0.0
+    weighted_ai_prob_sum = 0.0
+    total_file_duration = 0.0
 
-    # ----- LSTM inference -----
-    if _LSTM_MODEL is not None:
-        batch = lstm_tensor.to(DEVICE)  # already (1, T, N_MELS)
-        logits = _LSTM_MODEL(batch)
-        lstm_probs = torch.softmax(logits, dim=1).squeeze(0)  # (2,)
+    for w in windows:
+        total_file_duration += w.actual_duration_sec
+        
+        if w.is_silent:
+            window_predictions.append(WindowPrediction(
+                start_time_sec=w.start_time_sec,
+                end_time_sec=w.end_time_sec,
+                duration_sec=w.actual_duration_sec,
+                is_silent=True,
+                status="SILENT",
+                ai_probability=0.0,
+                prediction="N/A",
+            ))
+            continue
 
-    # ----- Require at least one model -----
-    if resnet_probs is None and lstm_probs is None:
-        raise RuntimeError(
-            "No models loaded. Call load_resnet() and/or load_lstm() at startup."
-        )
+        resnet_probs = None
+        lstm_probs = None
 
-    # ----- Individual predictions -----
-    def _label_and_conf(probs):
-        conf, idx = torch.max(probs, dim=0)
-        return CLASS_LABELS[int(idx.item())], round(float(conf.item()), 4)
+        if _RESNET_MODEL is not None and w.resnet_tensor is not None:
+            batch = w.resnet_tensor.unsqueeze(0).to(DEVICE)
+            logits = _RESNET_MODEL(batch)
+            resnet_probs = torch.softmax(logits, dim=1).squeeze(0)
 
-    if resnet_probs is not None:
-        resnet_label, resnet_conf = _label_and_conf(resnet_probs)
+        if _LSTM_MODEL is not None and w.lstm_tensor is not None:
+            batch = w.lstm_tensor.unsqueeze(0).to(DEVICE)
+            seq_len = batch.size(1)
+            lengths = torch.tensor([seq_len], device=DEVICE)
+            logits = _LSTM_MODEL(batch, lengths=lengths)
+            lstm_probs = torch.softmax(logits, dim=1).squeeze(0)
+
+        # Ensemble
+        if resnet_probs is not None and lstm_probs is not None:
+            resnet_w, lstm_w = get_ensemble_weights()
+            ensemble_probs = resnet_w * resnet_probs + lstm_w * lstm_probs
+        elif resnet_probs is not None:
+            ensemble_probs = resnet_probs
+        else:
+            ensemble_probs = lstm_probs
+            
+        ai_prob = float(ensemble_probs[1].item())
+        resnet_ai_prob = float(resnet_probs[1].item()) if resnet_probs is not None else 0.0
+        lstm_ai_prob = float(lstm_probs[1].item()) if lstm_probs is not None else 0.0
+        
+        # Classification
+        if ai_prob >= CONFIDENCE_THRESHOLD:
+            pred_label = "Spoofed"
+        elif ai_prob <= (1 - CONFIDENCE_THRESHOLD):
+            pred_label = "Real"
+        else:
+            pred_label = "Uncertain"
+
+        window_predictions.append(WindowPrediction(
+            start_time_sec=w.start_time_sec,
+            end_time_sec=w.end_time_sec,
+            duration_sec=w.actual_duration_sec,
+            is_silent=False,
+            status="ANALYZED",
+            ai_probability=ai_prob,
+            prediction=pred_label,
+            resnet_prob=resnet_ai_prob,
+            lstm_prob=lstm_ai_prob,
+            spectrogram_base64=w.spectrogram_base64,
+        ))
+
+        total_analyzed_duration += w.actual_duration_sec
+        weighted_ai_prob_sum += (ai_prob * w.actual_duration_sec)
+
+    if total_analyzed_duration == 0:
+        overall_status = "NO_AUDIO"
+        overall_ai_prob = 0.0
     else:
-        resnet_label, resnet_conf = "N/A", 0.0
+        overall_ai_prob = weighted_ai_prob_sum / total_analyzed_duration
+        if overall_ai_prob >= CONFIDENCE_THRESHOLD:
+            overall_status = "Spoofed"
+        elif overall_ai_prob <= (1 - CONFIDENCE_THRESHOLD):
+            overall_status = "Real"
+        else:
+            overall_status = "MIXED / SUSPICIOUS"
 
-    if lstm_probs is not None:
-        lstm_label, lstm_conf = _label_and_conf(lstm_probs)
-    else:
-        lstm_label, lstm_conf = "N/A", 0.0
-
-    # ----- Ensemble (weighted average of probability vectors) -----
-    if resnet_probs is not None and lstm_probs is not None:
-        ensemble_probs = RESNET_WEIGHT * resnet_probs + LSTM_WEIGHT * lstm_probs
-    elif resnet_probs is not None:
-        ensemble_probs = resnet_probs
-    else:
-        ensemble_probs = lstm_probs
-
-    ensemble_label, ensemble_conf = _label_and_conf(ensemble_probs)
-
-    return EnsemblePrediction(
-        resnet_prediction=resnet_label,
-        resnet_confidence=resnet_conf,
-        lstm_prediction=lstm_label,
-        lstm_confidence=lstm_conf,
-        ensemble_prediction=ensemble_label,
-        ensemble_confidence=ensemble_conf,
+    return FilePrediction(
+        overall_status=overall_status,
+        overall_ai_probability=overall_ai_prob,
+        total_duration_sec=total_file_duration,
+        windows=window_predictions,
     )

@@ -33,7 +33,7 @@ function UploadCard({ file, audioUrl, loading, error, onFileChange, onUpload }) 
           <h2 className="text-sm font-semibold text-slate-50 tracking-tight">Upload audio</h2>
         </div>
         <span className="rounded-full bg-slate-800/80 px-2 py-0.5 text-[11px] font-medium text-slate-300 border border-slate-700/80">
-          .wav · .mp3 · 3s
+          .wav · .mp3 · up to 60s
         </span>
       </div>
 
@@ -53,7 +53,7 @@ function UploadCard({ file, audioUrl, loading, error, onFileChange, onUpload }) 
         </div>
         <input
           type="file"
-          accept=".wav, audio/wav, .mp3, audio/mpeg"
+          accept=".wav,.mp3,.flac,.ogg,.m4a,.webm,audio/*"
           onChange={onFileChange}
           className="hidden"
         />

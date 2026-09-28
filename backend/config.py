@@ -32,14 +32,12 @@ LEGACY_MODEL_PATH = MODELS_DIR / "audio_model.pth"
 # Audio preprocessing constants (shared with training/dataset.py)
 # -----------------------------------------------------------------------------
 
-# Target sample rate in Hz — 16 kHz is standard for speech.
+# Target sample rate in Hz
 SAMPLE_RATE = 16_000
 
-# Fixed clip duration in seconds.
-AUDIO_DURATION_SEC = 3.0
-
-# Number of waveform samples for the fixed duration.
-NUM_SAMPLES = int(SAMPLE_RATE * AUDIO_DURATION_SEC)  # 48 000
+# We process audio in fixed 30-second contiguous windows.
+WINDOW_DURATION_SEC = 30.0
+WINDOW_NUM_SAMPLES = int(SAMPLE_RATE * WINDOW_DURATION_SEC)
 
 # Mel spectrogram parameters
 N_FFT = 1024
@@ -47,19 +45,15 @@ HOP_LENGTH = 512
 N_MELS = 128
 POWER = 2.0
 
-# Silence trimming threshold (dB below peak)
-TRIM_TOP_DB = 20
-
-# ResNet spatial input size
-RESNET_INPUT_SIZE = 224  # 224×224
+# Silence detection threshold (dB relative to peak)
+SILENCE_THRESHOLD_DB = 20.0
 
 # -----------------------------------------------------------------------------
 # LSTM feature dimensions
 # -----------------------------------------------------------------------------
 
-# The LSTM receives the mel-spectrogram *before* resize.
-# With 48 000 samples, N_FFT=1024, HOP_LENGTH=512:
-#   time_steps = 1 + floor(48000 / 512) = 94
+# The LSTM receives the mel-spectrogram at its natural time resolution.
+# Time steps vary with audio length: T = 1 + floor(num_samples / HOP_LENGTH)
 LSTM_INPUT_DIM = N_MELS        # 128 features per time step
 LSTM_HIDDEN_DIM = 128          # hidden state size
 LSTM_NUM_LAYERS = 2            # stacked LSTM layers
@@ -72,9 +66,28 @@ RESNET_NUM_CLASSES = 2
 # Ensemble weights  (must sum to 1.0)
 # Adjust these to trust one model more than the other.
 # -----------------------------------------------------------------------------
+import json
 
-RESNET_WEIGHT = 0.5
-LSTM_WEIGHT = 0.5
+def get_ensemble_weights():
+    """Dynamically load ensemble weights from JSON, fallback to 0.5/0.5."""
+    weights_file = MODELS_DIR / "ensemble_weights.json"
+    if weights_file.exists():
+        try:
+            with open(weights_file, "r") as f:
+                data = json.load(f)
+            return data.get("resnet_weight", 0.5), data.get("lstm_weight", 0.5)
+        except Exception:
+            pass
+    return 0.5, 0.5
+
+RESNET_WEIGHT, LSTM_WEIGHT = get_ensemble_weights()
+
+# -----------------------------------------------------------------------------
+# Confidence threshold
+# Predictions below this threshold are marked as "Uncertain".
+# -----------------------------------------------------------------------------
+
+CONFIDENCE_THRESHOLD = 0.70
 
 # -----------------------------------------------------------------------------
 # Class labels  (index 0 → Real, index 1 → AI Generated)

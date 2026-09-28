@@ -6,10 +6,12 @@
 class AudioResNet(nn.Module):
     def __init__(self) -> None:
         super().__init__()
-        base = resnet18(weights=None)
+        base = resnet18(weights=ResNet18_Weights.IMAGENET1K_V1)
 
-        # 1-channel input instead of 3
+        # 1-channel input instead of 3 (averaging ImageNet weights)
+        original_weight = base.conv1.weight.data.mean(dim=1, keepdim=True)
         base.conv1 = nn.Conv2d(1, 64, kernel_size=7, stride=2, padding=3, bias=False)
+        base.conv1.weight.data = original_weight
 
         # 2 output classes instead of 1000
         num_features = base.fc.in_features
@@ -21,9 +23,10 @@ class AudioResNet(nn.Module):
         return self.model(x)
 ```
 
-- `base` is the full standard ResNet-18 instance.
-- `conv1` is replaced to accept 1 input channel (mel spectrogram instead of 3-channel RGB).
-- `fc` is replaced to output 2 scores (Real vs AI Generated).
+- `base` is initialized with ImageNet pretrained weights.
+- `conv1` is replaced to accept 1 input channel (averaging the 3 RGB channels of the pretrained weights).
+- `fc` is replaced to output 2 scores (Real vs Spoofed).
+- The architecture accepts variable length `(1, 128, T)` inputs by utilizing `AdaptiveAvgPool2d((1, 1))`.
 
 ---
 
@@ -65,7 +68,7 @@ $$
 L = -\log\left(\frac{e^{z_y}}{\sum_{j=0}^{1} e^{z_j}}\right)
 $$
 
-Where $z_y$ is the logit for the true class $y$ (0 = Real, 1 = AI Generated).
+Where $z_y$ is the logit for the true class $y$ (0 = Real, 1 = Spoofed).
 
 ---
 
@@ -94,14 +97,14 @@ $$
 
 ## Data flow in inference / training
 
-1. `x` : (B,1,224,224)
-2. `conv1` + BN + **ReLU**: (B,64,112,112)
-3. `maxpool`: (B,64,56,56)
-4. `layer1` (2 BasicBlocks with **ReLU**): (B,64,56,56)
-5. `layer2` (2 BasicBlocks with **ReLU**): (B,128,28,28)
-6. `layer3` (2 BasicBlocks with **ReLU**): (B,256,14,14)
-7. `layer4` (2 BasicBlocks with **ReLU**): (B,512,7,7)
-8. `avgpool`: (B,512,1,1) → flatten (B,512)
+1. `x` : (B,1,128,T)
+2. `conv1` + BN + **ReLU**: (B,64,64,T/2)
+3. `maxpool`: (B,64,32,T/4)
+4. `layer1` (2 BasicBlocks with **ReLU**): (B,64,32,T/4)
+5. `layer2` (2 BasicBlocks with **ReLU**): (B,128,16,T/8)
+6. `layer3` (2 BasicBlocks with **ReLU**): (B,256,8,T/16)
+7. `layer4` (2 BasicBlocks with **ReLU**): (B,512,4,T/32)
+8. `AdaptiveAvgPool2d((1, 1))`: (B,512,1,1) → flatten (B,512)
 9. `fc`: (B,2) ← raw logits
 10. **Softmax** (inference only): (B,2) ← probabilities
 

@@ -19,18 +19,28 @@ class AudioLSTM(nn.Module):
             dropout=dropout,             # 0.3 between layers
         )
 
+        self.attention = nn.Sequential(
+            nn.Linear(hidden_dim * 2, hidden_dim),
+            nn.Tanh(),
+            nn.Linear(hidden_dim, 1)
+        )
+
         self.classifier = nn.Sequential(
             nn.Dropout(dropout),         # regularization
             nn.Linear(hidden_dim * 2, 64),  # 256 → 64
             nn.ReLU(),                   # non-linearity
             nn.Dropout(dropout),         # regularization
-            nn.Linear(64, num_classes),  # 64 → 2 (Real vs AI Generated)
+            nn.Linear(64, num_classes),  # 64 → 2 (Real vs Spoofed)
         )
 
     def forward(self, x):
         lstm_out, _ = self.lstm(x)       # (B, T, 256)
-        last = lstm_out[:, -1, :]        # (B, 256) — last time step
-        logits = self.classifier(last)   # (B, 2) — raw logits
+        
+        # Attention pooling over all timesteps
+        attn_weights = torch.softmax(self.attention(lstm_out), dim=1) # (B, T, 1)
+        context = torch.sum(attn_weights * lstm_out, dim=1) # (B, 256)
+        
+        logits = self.classifier(context)   # (B, 2) — raw logits
         return logits
 ```
 
@@ -48,20 +58,20 @@ class AudioLSTM(nn.Module):
 ## Architecture Overview
 
 ```
-Input: (B, 94, 128)          ← 94 time steps × 128 mel bands
+Input: (B, T, 128)          ← T time steps × 128 mel bands
          │
     ┌────▼────┐
-    │ LSTM L1 │  Forward → (B, 94, 128)
-    │ BiDir   │  Backward → (B, 94, 128)
-    │         │  Combined → (B, 94, 256)
+    │ LSTM L1 │  Forward → (B, T, 128)
+    │ BiDir   │  Backward → (B, T, 128)
+    │         │  Combined → (B, T, 256)
     └────┬────┘
          │ Dropout (0.3)
     ┌────▼────┐
-    │ LSTM L2 │  Forward → (B, 94, 128)
-    │ BiDir   │  Backward → (B, 94, 128)
-    │         │  Combined → (B, 94, 256)
+    │ LSTM L2 │  Forward → (B, T, 128)
+    │ BiDir   │  Backward → (B, T, 128)
+    │         │  Combined → (B, T, 256)
     └────┬────┘
-         │ Take last time step → (B, 256)
+         │ Attention Pooling over T steps → (B, 256)
          │
     ┌────▼────┐
     │ Dropout │  (B, 256)
@@ -71,21 +81,21 @@ Input: (B, 94, 128)          ← 94 time steps × 128 mel bands
     │ Linear  │  64 → 2
     └────┬────┘
          │
-    Output: (B, 2)              ← raw logits (Real vs AI Generated)
+    Output: (B, 2)              ← raw logits (Real vs Spoofed)
 ```
 
 ---
 
 ## Input Preparation
 
-The LSTM receives the mel spectrogram **without** the 224×224 resize that ResNet uses:
+The LSTM receives the mel spectrogram **without** the resize that ResNet uses:
 
 1. Audio is loaded and resampled to 16 kHz mono.
-2. Silence is trimmed, then padded/cropped to 3 seconds (48,000 samples).
+2. Silence is trimmed, then processed as variable-length up to 60 seconds.
 3. Mel spectrogram is computed: shape `(128 mel bands, T time frames)`.
-4. With `N_FFT=1024` and `HOP_LENGTH=512`: $T = 1 + \lfloor 48000 / 512 \rfloor = 94$.
+4. With `N_FFT=1024` and `HOP_LENGTH=512`, $T$ varies based on audio length.
 5. Log-dB conversion and z-score normalization.
-6. **Transpose** to `(T, 128)` = `(94, 128)` — each time step is a 128-dim feature vector.
+6. **Transpose** to `(T, 128)` — each time step is a 128-dim feature vector.
 
 This preserves the original temporal resolution, which is critical for the LSTM.
 
@@ -112,8 +122,8 @@ Where $\sigma$ = sigmoid, $\tanh$ = hyperbolic tangent, $\odot$ = element-wise m
 
 Two separate LSTMs process the same sequence:
 
-- **Forward**: $x_1, x_2, \dots, x_{94}$ → $\overrightarrow{h}_1, \dots, \overrightarrow{h}_{94}$
-- **Backward**: $x_{94}, x_{93}, \dots, x_1$ → $\overleftarrow{h}_1, \dots, \overleftarrow{h}_{94}$
+- **Forward**: $x_1, x_2, \dots, x_T$ → $\overrightarrow{h}_1, \dots, \overrightarrow{h}_T$
+- **Backward**: $x_T, x_{T-1}, \dots, x_1$ → $\overleftarrow{h}_1, \dots, \overleftarrow{h}_T$
 
 At each step, outputs are concatenated:
 
@@ -131,6 +141,7 @@ This gives the model access to **both past and future context** at every time st
 |----------|-----------|-------------|---------|
 | Forget/Input/Output gates | **Sigmoid** | $(0, 1)$ | Soft switches controlling info flow |
 | Cell state / candidate | **Tanh** | $(-1, 1)$ | Squash values symmetrically |
+| Attention Mechanism | **Tanh** & **Softmax** | $(-1, 1)$ & $(0, 1)$ | Computes learned weights for timesteps |
 | Classifier FC head | **ReLU** | $[0, \infty)$ | Non-linearity between Linear layers |
 | Inference | **Softmax** | $(0, 1)$, sums to 1 | Convert logits to probabilities |
 
@@ -145,7 +156,7 @@ L = -\log\left(\frac{e^{z_y}}{\sum_{j=0}^{1} e^{z_j}}\right)
 $$
 
 - Accepts raw logits (no softmax in model output during training).
-- $y$ = true class: 0 (Real) or 1 (AI Generated).
+- $y$ = true class: 0 (Real) or 1 (Spoofed).
 
 ---
 
@@ -164,7 +175,7 @@ $$
 
 | Aspect | ResNet-18 | LSTM |
 |--------|-----------|------|
-| Input | 2D spectrogram image (1, 224, 224) | 1D temporal sequence (94, 128) |
+| Input | 2D spectrogram image (1, 128, T) | 1D temporal sequence (T, 128) |
 | Type | CNN (Convolutional Neural Network) | RNN (Recurrent Neural Network) |
 | What it learns | Spatial texture patterns | Temporal dynamics |
 | Activation (main) | ReLU | Sigmoid + Tanh (gates), ReLU (head) |
@@ -190,13 +201,13 @@ Saves weights to: `models/lstm_audio_model.pth`
 Audio File
   → Resample 16kHz
   → Trim silence
-  → Pad/crop to 3 seconds (48,000 samples)
-  → Mel spectrogram (128, 94)
+  → Variable-length up to 60 seconds
+  → Mel spectrogram (128, T)
   → Log-dB + Normalize
-  → Transpose to (94, 128)
-  → LSTM Layer 1 (BiDir) → (94, 256)
-  → Dropout → LSTM Layer 2 (BiDir) → (94, 256)
-  → Last time step → (256,)
+  → Transpose to (T, 128)
+  → LSTM Layer 1 (BiDir) → (T, 256)
+  → Dropout → LSTM Layer 2 (BiDir) → (T, 256)
+  → Attention Pooling → (256,)
   → Dropout → Linear → ReLU → Dropout → Linear → (2,) logits
-  → Softmax (inference) → [P(Real), P(AI Generated)]
+  → Softmax (inference) → [P(Real), P(Spoofed)]
 ```

@@ -167,7 +167,7 @@ async def predict_endpoint(file: UploadFile = File(..., description="Audio file 
     try:
         # ----- Step 2 & 3: Preprocess -----
         logger.debug("Preprocessing audio from %s (%d bytes)", filename, file_size)
-        preprocessed = preprocess_audio(file_like)
+        windows = preprocess_audio(file_like)
 
         # ----- Step 4, 5, 6: Ensemble inference -----
         status = models_loaded()
@@ -176,20 +176,29 @@ async def predict_endpoint(file: UploadFile = File(..., description="Audio file 
                 "No models are loaded. Train at least one model and restart the server."
             )
 
-        result = ensemble_predict(
-            resnet_tensor=preprocessed.resnet_tensor,
-            lstm_tensor=preprocessed.lstm_tensor,
-        )
+        result = ensemble_predict(windows)
 
         # ----- Step 7: Build response -----
         return {
-            "resnet_prediction": result.resnet_prediction,
-            "resnet_confidence": result.resnet_confidence,
-            "lstm_prediction": result.lstm_prediction,
-            "lstm_confidence": result.lstm_confidence,
-            "ensemble_prediction": result.ensemble_prediction,
-            "ensemble_confidence": result.ensemble_confidence,
-            "spectrogram_image": preprocessed.spectrogram_base64,
+            "overall_status": result.overall_status,
+            "overall_ai_probability": result.overall_ai_probability,
+            "total_duration_sec": result.total_duration_sec,
+            "confidence_threshold": 0.70,
+            "windows": [
+                {
+                    "start_time_sec": w.start_time_sec,
+                    "end_time_sec": w.end_time_sec,
+                    "duration_sec": w.duration_sec,
+                    "is_silent": w.is_silent,
+                    "status": w.status,
+                    "ai_probability": w.ai_probability,
+                    "prediction": w.prediction,
+                    "resnet_prob": w.resnet_prob,
+                    "lstm_prob": w.lstm_prob,
+                    "spectrogram_image": w.spectrogram_base64,
+                }
+                for w in result.windows
+            ]
         }
 
     except RuntimeError as e:

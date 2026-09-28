@@ -1,85 +1,91 @@
 """
 Audio preprocessing module for the Audio Deepfake Detection pipeline.
 
-Returns three outputs from a single audio file:
-  1. ResNet tensor   — shape (1, 224, 224) mel-spectrogram image
-  2. LSTM tensor     — shape (1, T, N_MELS) sequential mel-spectrogram
-  3. Spectrogram PNG — base64-encoded PNG string for frontend display
+Returns a list of WindowData objects from a single audio file, where each
+window represents a 30-second contiguous chunk of the original file.
 
 Steps performed:
-  1. Load audio with librosa
-  2. Resample to 16 000 Hz mono
-  3. Trim leading/trailing silence
-  4. Pad or crop to exactly AUDIO_DURATION_SEC seconds
-  5. Compute mel spectrogram → log dB → normalize
-  6. Resize to 224×224 for ResNet
-  7. Keep original (T, N_MELS) sequence for LSTM
-  8. Render spectrogram to a base64 PNG for the frontend
+  1. Load audio with librosa (16 kHz mono)
+  2. DO NOT trim silence.
+  3. Divide into 30-second windows.
+  4. For each window:
+     a. Detect silence based on short-time RMS energy.
+     b. If silent, flag as is_silent=True.
+     c. If not silent, zero-pad to 30 seconds if it's a short final window.
+     d. Compute mel spectrogram -> log dB -> normalize.
+     e. Generate ResNet tensor (1, N_MELS, T)
+     f. Generate LSTM tensor (1, T, N_MELS)
+     g. Render spectrogram to a base64 PNG.
 """
 
 import base64
 import io
 from dataclasses import dataclass
-from typing import BinaryIO, Union
+from typing import BinaryIO, List, Optional, Union
 
 import librosa
 import matplotlib
-matplotlib.use("Agg")  # non-interactive backend — no GUI window
+matplotlib.use("Agg")  # non-interactive backend
 import matplotlib.pyplot as plt
 import numpy as np
 import torch
-import torch.nn.functional as F
 
 from config import (
-    AUDIO_DURATION_SEC,
     HOP_LENGTH,
     N_FFT,
     N_MELS,
-    NUM_SAMPLES,
     POWER,
-    RESNET_INPUT_SIZE,
     SAMPLE_RATE,
-    TRIM_TOP_DB,
+    SILENCE_THRESHOLD_DB,
+    WINDOW_DURATION_SEC,
+    WINDOW_NUM_SAMPLES,
 )
 
-# -----------------------------------------------------------------------------
-# Data class for preprocessed outputs
-# -----------------------------------------------------------------------------
 
 @dataclass
-class PreprocessedAudio:
-    """Container for all three outputs of the preprocessing pipeline."""
-    resnet_tensor: torch.Tensor      # (1, 224, 224)
-    lstm_tensor: torch.Tensor        # (1, T, N_MELS)
-    spectrogram_base64: str          # base64-encoded PNG image
+class WindowData:
+    """Container for preprocessing outputs of a single 30-second window."""
+    start_time_sec: float
+    end_time_sec: float
+    actual_duration_sec: float
+    is_silent: bool
+    resnet_tensor: Optional[torch.Tensor] = None
+    lstm_tensor: Optional[torch.Tensor] = None
+    spectrogram_base64: Optional[str] = None
 
 
-# -----------------------------------------------------------------------------
-# Internal helper functions
-# -----------------------------------------------------------------------------
-
-def _trim_silence(y: np.ndarray) -> np.ndarray:
-    """Trim leading and trailing silence from the waveform."""
-    y_trimmed, _ = librosa.effects.trim(y, top_db=TRIM_TOP_DB)
-    return y_trimmed
-
-
-def _pad_or_crop(y: np.ndarray, target_length: int) -> np.ndarray:
+def _is_silent(y: np.ndarray) -> bool:
     """
-    Ensure the waveform has exactly *target_length* samples.
-    Shorter → zero-pad at the end.  Longer → take a centered segment.
+    Energy-based silence detector.
+    Returns True if the maximum energy in the window is below the silence threshold.
     """
-    n = len(y)
-    if n < target_length:
-        y = np.pad(y, (0, target_length - n), mode="constant", constant_values=0.0)
-    elif n > target_length:
-        start = (n - target_length) // 2
-        y = y[start : start + target_length]
+    if len(y) == 0:
+        return True
+    # Calculate short-time RMS energy
+    rms = librosa.feature.rms(y=y, frame_length=N_FFT, hop_length=HOP_LENGTH)
+    # Convert to dB
+    rms_db = librosa.amplitude_to_db(rms, ref=np.max)
+    # Check if ANY frame has meaningful energy
+    # Note: amplitude_to_db with ref=np.max sets peak to 0 dB, so silence is negative.
+    # To detect silence across the whole clip based on an absolute threshold, we can
+    # instead compare peak amplitude to a fixed tiny value.
+    # Alternatively, librosa.effects.trim does: y, index = librosa.effects.trim(y, top_db=TRIM_TOP_DB)
+    # We can use a similar logic without trimming:
+    # Just look at the max amplitude.
+    peak_amplitude = np.max(np.abs(y))
+    # threshold for silence
+    threshold = 10 ** (-SILENCE_THRESHOLD_DB / 20.0)
+    return float(peak_amplitude) < threshold
+
+
+def _pad_to_window(y: np.ndarray) -> np.ndarray:
+    """Zero-pad short audio to match exactly WINDOW_NUM_SAMPLES."""
+    if len(y) < WINDOW_NUM_SAMPLES:
+        y = np.pad(y, (0, WINDOW_NUM_SAMPLES - len(y)), mode='constant')
     return y
 
 
 def _compute_mel_spectrogram(y: np.ndarray) -> np.ndarray:
-    """Compute mel spectrogram from waveform (power scale)."""
     return librosa.feature.melspectrogram(
         y=y,
         sr=SAMPLE_RATE,
@@ -91,12 +97,10 @@ def _compute_mel_spectrogram(y: np.ndarray) -> np.ndarray:
 
 
 def _to_log_scale(mel_spec: np.ndarray) -> np.ndarray:
-    """Convert power spectrogram to log scale (decibels)."""
     return librosa.power_to_db(mel_spec, ref=np.max)
 
 
 def _normalize(mel_db: np.ndarray) -> np.ndarray:
-    """Normalize to zero mean and unit variance (per spectrogram)."""
     mean = float(np.mean(mel_db))
     std = float(np.std(mel_db))
     if std <= 0:
@@ -104,18 +108,7 @@ def _normalize(mel_db: np.ndarray) -> np.ndarray:
     return (mel_db - mean) / std
 
 
-def _resize_tensor(tensor: torch.Tensor, h: int, w: int) -> torch.Tensor:
-    """Resize a (1, H, W) tensor to (1, h, w) with bilinear interpolation."""
-    return F.interpolate(
-        tensor.unsqueeze(0), size=(h, w), mode="bilinear", align_corners=False
-    ).squeeze(0)
-
-
-def _spectrogram_to_base64(mel_db: np.ndarray) -> str:
-    """
-    Render the log-scale mel spectrogram as a PNG and return a
-    base64-encoded data-URI string ready for <img src="...">.
-    """
+def _spectrogram_to_base64(mel_db: np.ndarray, start_time: float, end_time: float) -> str:
     fig, ax = plt.subplots(figsize=(5, 3), dpi=100)
     img = librosa.display.specshow(
         mel_db,
@@ -127,7 +120,7 @@ def _spectrogram_to_base64(mel_db: np.ndarray) -> str:
         cmap="magma",
     )
     fig.colorbar(img, ax=ax, format="%+2.0f dB")
-    ax.set_title("Mel Spectrogram", fontsize=10)
+    ax.set_title(f"Mel Spectrogram ({start_time:.1f}s - {end_time:.1f}s)", fontsize=10)
     fig.tight_layout()
 
     buf = io.BytesIO()
@@ -138,69 +131,76 @@ def _spectrogram_to_base64(mel_db: np.ndarray) -> str:
     return f"data:image/png;base64,{b64}"
 
 
-# -----------------------------------------------------------------------------
-# Core pipeline: waveform → PreprocessedAudio
-# -----------------------------------------------------------------------------
+def _process_window(y_window: np.ndarray, start_time: float, end_time: float, actual_duration: float) -> WindowData:
+    if _is_silent(y_window):
+        return WindowData(
+            start_time_sec=start_time,
+            end_time_sec=end_time,
+            actual_duration_sec=actual_duration,
+            is_silent=True,
+        )
 
-def _waveform_to_preprocessed(y: np.ndarray) -> PreprocessedAudio:
-    """
-    Convert a mono waveform (already at SAMPLE_RATE) into all
-    three outputs needed by the dual-model backend.
-    """
-    y = _trim_silence(y)
-    y = _pad_or_crop(y, NUM_SAMPLES)
+    # Pad if short
+    y_padded = _pad_to_window(y_window)
 
-    # Mel spectrogram (shape: N_MELS × T)
-    mel_spec = _compute_mel_spectrogram(y)
+    mel_spec = _compute_mel_spectrogram(y_padded)
     mel_db = _to_log_scale(mel_spec)
     mel_norm = _normalize(mel_db)
 
-    # --- ResNet tensor: (1, 224, 224) ---
-    resnet_tensor = torch.from_numpy(mel_norm).float().unsqueeze(0)  # (1, N_MELS, T)
-    resnet_tensor = _resize_tensor(resnet_tensor, RESNET_INPUT_SIZE, RESNET_INPUT_SIZE)
+    # ResNet tensor: (1, N_MELS, T)
+    resnet_tensor = torch.from_numpy(mel_norm).float().unsqueeze(0)
 
-    # --- LSTM tensor: (1, T, N_MELS) ---
-    # mel_norm is (N_MELS, T) → transpose to (T, N_MELS), add batch dim
-    lstm_seq = mel_norm.T  # (T, N_MELS)
-    lstm_tensor = torch.from_numpy(lstm_seq).float().unsqueeze(0)  # (1, T, N_MELS)
+    # LSTM tensor: (1, T, N_MELS)
+    lstm_seq = mel_norm.T
+    lstm_tensor = torch.from_numpy(lstm_seq).float().unsqueeze(0)
 
-    # --- Spectrogram image for frontend ---
-    spec_b64 = _spectrogram_to_base64(mel_db)
+    spec_b64 = _spectrogram_to_base64(mel_db, start_time, end_time)
 
-    return PreprocessedAudio(
+    return WindowData(
+        start_time_sec=start_time,
+        end_time_sec=end_time,
+        actual_duration_sec=actual_duration,
+        is_silent=False,
         resnet_tensor=resnet_tensor,
         lstm_tensor=lstm_tensor,
         spectrogram_base64=spec_b64,
     )
 
 
-# -----------------------------------------------------------------------------
-# Public API — accepts file-like, bytes, or path
-# -----------------------------------------------------------------------------
+def _waveform_to_windows(y: np.ndarray) -> List[WindowData]:
+    """Chunk the waveform into 30-second windows and process each."""
+    total_samples = len(y)
+    if total_samples == 0:
+        return [WindowData(0.0, 0.0, 0.0, is_silent=True)]
 
-def preprocess_audio(file: Union[BinaryIO, bytes, str]) -> PreprocessedAudio:
+    windows = []
+    for i in range(0, total_samples, WINDOW_NUM_SAMPLES):
+        y_chunk = y[i:i + WINDOW_NUM_SAMPLES]
+        start_time = i / SAMPLE_RATE
+        actual_duration = len(y_chunk) / SAMPLE_RATE
+        end_time = start_time + actual_duration
+        
+        window_data = _process_window(y_chunk, start_time, end_time, actual_duration)
+        windows.append(window_data)
+
+    return windows
+
+
+def preprocess_audio(file: Union[BinaryIO, bytes, str]) -> List[WindowData]:
     """
-    Preprocess an audio source and return a PreprocessedAudio bundle.
-
-    Args:
-        file: A binary file-like object, raw bytes, or a file path string.
-
-    Returns:
-        PreprocessedAudio with resnet_tensor, lstm_tensor, and
-        spectrogram_base64.
-
-    Raises:
-        ValueError: If the audio cannot be loaded.
+    Preprocess an audio source and return a list of WindowData.
     """
-    if isinstance(file, bytes):
-        file = io.BytesIO(file)
-    elif isinstance(file, str):
+    try:
+        if isinstance(file, bytes):
+            file = io.BytesIO(file)
+        elif isinstance(file, str):
+            y, _ = librosa.load(file, sr=SAMPLE_RATE, mono=True)
+            return _waveform_to_windows(y)
+    
+        raw = file.read() if hasattr(file, "read") else file
+        if isinstance(raw, bytes):
+            file = io.BytesIO(raw)
         y, _ = librosa.load(file, sr=SAMPLE_RATE, mono=True)
-        return _waveform_to_preprocessed(y)
-
-    # File-like object
-    raw = file.read() if hasattr(file, "read") else file
-    if isinstance(raw, bytes):
-        file = io.BytesIO(raw)
-    y, _ = librosa.load(file, sr=SAMPLE_RATE, mono=True)
-    return _waveform_to_preprocessed(y)
+        return _waveform_to_windows(y)
+    except Exception as e:
+        raise ValueError(f"Could not decode audio file. ({str(e)})")
