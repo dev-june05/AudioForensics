@@ -122,8 +122,36 @@ class PartialSpoofDataset(Dataset):
         self.resolution_sec = resolution_sec
 
         # Load segment labels (dict mapping file_id to array of '0' and '1')
-        raw_labels = np.load(segment_labels_path, allow_pickle=True).item()
-        
+        if str(segment_labels_path).endswith('.npy'):
+            raw_labels = np.load(segment_labels_path, allow_pickle=True).item()
+        else:
+            # Parse PartialSpoof .txt protocol file directly
+            raw_labels = {}
+            with open(segment_labels_path, 'r') as f:
+                for line in f:
+                    parts = line.strip().split()
+                    if len(parts) >= 5:
+                        file_id = parts[1]
+                        
+                        # Find the label key ('bonafide' or 'spoof')
+                        key_idx = -1
+                        for i, p in enumerate(parts):
+                            if p.lower() in ('bonafide', 'spoof'):
+                                key_idx = i
+                                break
+                                
+                        if key_idx != -1 and key_idx + 1 < len(parts):
+                            segments_str = parts[key_idx + 1:]
+                            # Handle both space-separated ['0', '1', '1'] and concatenated ['0110']
+                            if len(segments_str) == 1 and len(segments_str[0]) > 1:
+                                segments = list(segments_str[0])
+                            else:
+                                segments = segments_str
+                            raw_labels[file_id] = segments
+            
+            if not raw_labels:
+                raise ValueError(f"Could not parse any segment labels from {segment_labels_path}")
+
         # Filter files if file_list is provided
         if file_list is not None:
             allowed_ids = {Path(f).stem for f in file_list}
