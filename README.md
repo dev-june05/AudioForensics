@@ -1,19 +1,19 @@
-# AI-Generated Audio Detection
-
+# AudioForensics — AI-Generated Audio Detection
 
 **Using Spectral Feature Analysis and Deep Learning**
 
-A full-stack web application that detects AI-generated audio using a **ResNet-18 + LSTM ensemble** with **full-length audio processing** and **attention-based temporal analysis** trained on mel-spectrogram features. Upload a speech clip, and the system will classify it as **Real** or **Spoofed** with confidence scores from two independent deep learning models.
+A full-stack web application that detects AI-generated and partially spoofed audio using a **ResNet-18 + BiLSTM ensemble** with **30-second windowed analysis** and **attention-based temporal pooling**. Upload a speech clip, and the system classifies it as **Real** or **Spoofed** with confidence scores from two independent deep learning models.
 
 ---
 
 ## Problem Statement
 
-The rapid advancement of AI voice synthesis (text-to-speech, voice cloning, deepfake audio) has made it increasingly difficult to distinguish real human speech from machine-generated audio. This project addresses the challenge of **automatic AI-generated audio detection** by combining two complementary deep learning approaches.
+The rapid advancement of AI voice synthesis (text-to-speech, voice cloning, deepfake audio) has made it increasingly difficult to distinguish real human speech from machine-generated audio. Modern spoofing attacks can inject fake segments into otherwise genuine recordings, making **partial spoofing** a critical challenge. This project addresses the problem by combining two complementary deep learning approaches trained on the PartialSpoof dataset.
 
 ## Motivation
 
 - AI-generated speech is being misused for fraud, misinformation, and identity theft.
+- Partial spoofing (where only segments of audio are fake) requires models that can analyze temporal context across longer windows.
 - Single-model classifiers can be brittle — an ensemble of architecturally different models provides more robust detection.
 - Mel-spectrogram analysis captures both spatial (frequency domain patterns) and temporal (time-series dynamics) anomalies left by audio generation algorithms.
 
@@ -26,28 +26,26 @@ The rapid advancement of AI voice synthesis (text-to-speech, voice cloning, deep
 │                         FRONTEND (React)                         │
 │  Upload audio → Preview → Send to API → Display ensemble results │
 │  Show spectrogram image, ResNet card, LSTM card, Ensemble card   │
-└────────────────────────────┬─────────────────────────────────────┘
-                             │  HTTP POST /predict (multipart file)
-                             ▼
+└────────────────────────────────┬─────────────────────────────────┘
+                                 │  HTTP POST /predict (multipart file)
+                                 ▼
 ┌──────────────────────────────────────────────────────────────────┐
 │                      BACKEND (FastAPI)                           │
 │                                                                  │
 │  1. Validate uploaded audio file                                 │
 │  2. Preprocess (preprocess.py):                                  │
 │     • Resample to 16 kHz mono                                    │
-│     • Trim silence                                               │
-│     • Cap length at 60 seconds (no cropping or padding for       │
-│       shorter clips)                                             │
+│     • Divide into 30-second contiguous windows                   │
 │     • Compute mel spectrogram (128 mel bands)                    │
 │     • Generate:                                                  │
-│       - ResNet tensor (1, 128, T) at natural resolution          │
-│       - LSTM tensor (1, T, 128) variable-length                  │
+│       - ResNet tensor (1, 128, T) per window                     │
+│       - LSTM tensor (1, T, 128) per window                       │
 │       - Base64 spectrogram PNG                                   │
 │                                                                  │
 │  3. Inference (model_loader.py):                                 │
 │     • ResNet-18 → softmax probabilities                          │
 │     • LSTM (BiLSTM) → softmax probabilities                      │
-│     • Weighted ensemble (configurable weights)                   │
+│     • Weighted ensemble (configurable/learned weights)           │
 │                                                                  │
 │  4. Return JSON response with all predictions                    │
 └──────────────────────────────────────────────────────────────────┘
@@ -55,11 +53,11 @@ The rapid advancement of AI voice synthesis (text-to-speech, voice cloning, deep
 
 ### Data Flow
 
-1. **User** selects an audio file (WAV, MP3, etc.) in the React frontend.
+1. **User** selects an audio file (WAV, MP3, FLAC, etc.) in the React frontend.
 2. **Frontend** sends the file via `POST /predict` to the FastAPI backend.
-3. **Backend** preprocesses the audio once and produces tensors for both models.
-4. **ResNet-18** receives a natural-resolution mel-spectrogram (128×T) and classifies spatial patterns.
-5. **LSTM** receives a variable-length (T, 128) temporal mel sequence with attention pooling and classifies time-series dynamics.
+3. **Backend** preprocesses the audio into fixed 30-second windows and produces tensors for both models.
+4. **ResNet-18** receives a mel-spectrogram image `(1, 128, T)` and classifies spatial patterns.
+5. **LSTM** receives a temporal mel sequence `(T, 128)` with attention pooling and classifies time-series dynamics.
 6. **Ensemble** merges both probability vectors via weighted averaging.
 7. **Response** JSON is sent back containing individual predictions, confidence scores, and the spectrogram image.
 8. **Frontend** displays the spectrogram and three prediction cards (ResNet, LSTM, Ensemble).
@@ -69,17 +67,17 @@ The rapid advancement of AI voice synthesis (text-to-speech, voice cloning, deep
 ## Features
 
 - **Dual-model ensemble** — ResNet-18 (CNN) + Bidirectional LSTM (RNN) for robust detection.
-- **Full-length audio processing** — analyzes entire audio files (up to 60 seconds), no fixed 3-second crop.
+- **30-second windowed analysis** — audio is divided into fixed 30s contiguous windows for consistent processing.
+- **PartialSpoof support** — detects partially spoofed audio where only segments within a file are fake.
 - **Attention-based LSTM** — learned attention mechanism focuses on the most informative timesteps.
 - **Transfer learning** — ResNet-18 initialized with ImageNet pretrained weights for better feature extraction.
-- **Data augmentation** — noise injection, time stretch, pitch shift, and SpecAugment during training.
+- **Data augmentation** — noise injection, time stretch, pitch shift during training.
 - **Confidence thresholds** — predictions below 70% confidence are marked as Uncertain.
-- **Stratified data splitting** — balanced class distribution in train/validation sets.
+- **Learned ensemble weights** — `train_ensemble.py` optimizes the ResNet/LSTM blend using validation data.
+- **Zero data leakage** — train/val split is done by file ID, not by window.
 - **Individual model predictions** — See what each model thinks independently.
-- **Ensemble final prediction** — Weighted average of both models' softmax probabilities.
-- **Spectrogram visualization** — The mel spectrogram used by ResNet is displayed on the dashboard.
+- **Spectrogram visualization** — The mel spectrogram is displayed on the dashboard.
 - **Audio preview** — Listen to the uploaded clip directly in the browser.
-- **Configurable ensemble weights** — Adjust model trust in `backend/config.py`.
 - **Modern dark-themed UI** — Glassmorphism, GSAP animations, responsive layout.
 
 ---
@@ -87,10 +85,12 @@ The rapid advancement of AI voice synthesis (text-to-speech, voice cloning, deep
 ## Tech Stack
 
 | Layer             | Technology                                         |
-|-------------------|----------------------------------------------------|
+|-------------------|---------------------------------------------------|
 | **Frontend**      | React 18, Tailwind CSS 3, GSAP, Lucide Icons, Vite |
 | **Backend**       | FastAPI, Uvicorn, Python 3.10+                     |
 | **Deep Learning** | PyTorch, torchvision, librosa                      |
+| **Training**      | NVIDIA DGX B200 (multi-GPU)                        |
+| **Dataset**       | PartialSpoof (ASVspoof-derived, segment-level labels) |
 | **Visualization** | matplotlib (server-side spectrogram rendering)     |
 
 ---
@@ -98,7 +98,7 @@ The rapid advancement of AI voice synthesis (text-to-speech, voice cloning, deep
 ## Folder Structure
 
 ```
-DL Project/
+AudioForensics/
 ├── backend/                  # FastAPI backend
 │   ├── config.py             # Centralized constants (paths, dims, weights)
 │   ├── main.py               # FastAPI app, endpoints, lifecycle
@@ -108,6 +108,7 @@ DL Project/
 │   └── requirements.txt      # Python dependencies
 │
 ├── docs/                     # Detailed architectural documentation
+│   ├── Internship_Project_Report.md
 │   ├── LSTM.md
 │   ├── Mathematical Calculation.md
 │   └── Resnet.md
@@ -128,19 +129,17 @@ DL Project/
 │
 ├── training/                 # Model training pipeline
 │   ├── train.py              # CLI training script (--model resnet|lstm)
+│   ├── train_ensemble.py     # Learn optimal ensemble weights
 │   ├── model.py              # AudioResNet + AudioLSTM definitions
-│   └── dataset.py            # PyTorch Dataset with resnet/lstm modes
+│   ├── dataset.py            # PartialSpoofDataset (30s windows, segment labels)
+│   └── download_dataset.py   # Dataset download helper
 │
 ├── models/                   # Trained weight files
 │   ├── resnet_audio_model.pth
-│   └── lstm_audio_model.pth
+│   ├── lstm_audio_model.pth
+│   └── ensemble_weights.json # Learned blend weights (generated by train_ensemble.py)
 │
-├── dataset/                  # Training data (not committed)
-│   └── train/
-│       ├── real/             # Real audio files
-│       └── fake/             # AI-generated audio files
-│
-├── setup.bat                 # Automated dependency installer script
+├── requirements_b200.txt     # DGX B200 server dependencies
 └── README.md                 # This file
 ```
 
@@ -154,30 +153,14 @@ DL Project/
 - Node.js 18+ and npm
 - (Optional) NVIDIA GPU with CUDA for faster training
 
-### Quick Setup (Recommended for Windows Users)
-
-If you are on Windows, you can simply run the automated setup script to install all dependencies and set up your Python virtual environment.
-
-Double-click on `setup.bat` or run it from the command line:
-```cmd
-setup.bat
-```
-Once it finishes, it will display instructions on how to start the frontend and backend.
-
----
-
-### Manual Setup Instructions
-
-If you prefer to set up the project manually or are on macOS/Linux:
-
-#### 1. Clone the repository
+### 1. Clone the repository
 
 ```bash
-git clone https://github.com/dev-june05/AI-generated-and-Tampered-Audio-Detection
-cd "DL Project"
+git clone https://github.com/dev-june05/AudioForensics
+cd AudioForensics
 ```
 
-#### 2. Backend setup (Virtual Environment)
+### 2. Backend setup
 
 ```bash
 cd backend
@@ -192,7 +175,7 @@ source venv/bin/activate
 pip install -r requirements.txt
 ```
 
-#### 3. Frontend setup
+### 3. Frontend setup
 
 ```bash
 cd ../frontend
@@ -201,22 +184,32 @@ npm install
 
 ### 4. Train models
 
-Place your audio dataset under `dataset/train/real/` and `dataset/train/fake/`, then:
+Training uses the **PartialSpoof** dataset with segment-level labels. You need:
+- Audio directories containing `.wav` or `.flac` files
+- A segment labels `.npy` file (e.g., `train_seglab_0.64.npy`)
 
 ```bash
 cd training
 
 # Train ResNet-18
-python train.py --model resnet --epochs 25 --batch-size 16
+python train.py --model resnet \
+  --audio-dirs /path/to/audio/dir1 /path/to/audio/dir2 \
+  --segment-labels /path/to/train_seglab_0.64.npy \
+  --epochs 30 --batch-size 32
 
 # Train LSTM
-python train.py --model lstm --epochs 25 --batch-size 16
+python train.py --model lstm \
+  --audio-dirs /path/to/audio/dir1 \
+  --segment-labels /path/to/train_seglab_0.64.npy \
+  --epochs 30 --batch-size 32
 
-# Train without augmentation (faster, for debugging)
-python train.py --model resnet --epochs 25 --batch-size 16 --no-augment
+# Learn optimal ensemble weights (after both models are trained)
+python train_ensemble.py \
+  --audio-dirs /path/to/audio/dir1 \
+  --segment-labels /path/to/train_seglab_0.64.npy
 ```
 
-Model weights will be saved to `models/resnet_audio_model.pth` and `models/lstm_audio_model.pth`.
+Model weights will be saved to `models/`.
 
 ### 5. Run the backend
 
@@ -243,62 +236,46 @@ Open `http://localhost:5173` in your browser.
 | Property       | Value                                                 |
 |----------------|-------------------------------------------------------|
 | Architecture   | ResNet-18 (modified: 1-channel input, 2-class output) |
-| Input          | Mel spectrogram `(1, 128, T)` at natural resolution   |
+| Input          | Mel spectrogram `(1, 128, T)` from 30s window         |
 | Features       | 128 mel bands, 1024 FFT, 512 hop length               |
-| Preprocessing  | Log-dB, z-score normalization (no resize — adaptive pooling handles variable size) |
+| Preprocessing  | Log-dB, z-score normalization, AdaptiveAvgPool2d(1,1)  |
 | Transfer Learning | ImageNet pretrained weights (3-channel averaged to 1-channel) |
 | Activations    | ReLU (in every residual block and after conv1)        |
-| Output         | 2 logits → softmax → [P(Real), P(Fake)]               |
+| Output         | 2 logits → softmax → [P(Real), P(Spoofed)]            |
 
 ### LSTM (Temporal Sequence Classifier)
 
 | Property              | Value                                                    |
 |-----------------------|----------------------------------------------------------|
 | Architecture          | 2-layer Bidirectional LSTM + FC classifier               |
-| Input                 | Mel-spectrogram time series `(T, 128)` — variable length |
-| Features              | Same mel spectrogram (transposed), with attention-weighted pooling over all timesteps |
-| Pooling               | Learned attention mechanism (replaces last-timestep only) |
+| Input                 | Mel-spectrogram time series `(T, 128)` from 30s window   |
+| Features              | Same mel spectrogram (transposed), with attention-weighted pooling |
+| Pooling               | Learned attention mechanism over all timesteps           |
 | Hidden dim            | 128 per direction (256 total)                            |
 | Gate activations      | Sigmoid (input/forget/output gates), Tanh (cell state)   |
 | Classifier activation | ReLU (in FC head between Linear layers)                  |
 | Dropout               | 0.3                                                      |
-| Output                | 2 logits → softmax → [P(Real), P(Fake)]                  |
+| Output                | 2 logits → softmax → [P(Real), P(Spoofed)]               |
 
 ### Loss Function
 
 Both models are trained with **CrossEntropyLoss** (`torch.nn.CrossEntropyLoss`).
 
-CrossEntropyLoss combines `LogSoftmax` and `NLLLoss` in one step:
-
 ```
 L = -log( exp(logits[y]) / Σ exp(logits[j]) )
 ```
 
-Where `y` is the true class index (0 = Real, 1 = Spoofed). This is the standard loss for multi-class classification with raw logits.
-
-### Activation Functions Summary
-
-| Location | Activation | Purpose |
-|----------|-----------|---------|
-| ResNet BasicBlocks | **ReLU** | Non-linearity after each Conv+BN pair |
-| ResNet Conv1 | **ReLU** | Non-linearity after first convolution |
-| LSTM gates (internal) | **Sigmoid** | Controls information flow (input, forget, output gates) |
-| LSTM cell state (internal) | **Tanh** | Squashes cell state and candidate values to [-1, 1] |
-| LSTM classifier FC head | **ReLU** | Non-linearity between the two Linear layers |
-| LSTM attention layer | **Tanh** | Non-linearity in attention score computation |
-| Inference (both models) | **Softmax** | Converts raw logits to probabilities for prediction |
-
-> **Note:** Softmax is applied only at inference time (`model_loader.py`). During training, `CrossEntropyLoss` handles the softmax internally, so the models output raw logits.
+Where `y` is the true class index (0 = Real, 1 = Spoofed).
 
 ### Ensemble Strategy
 
-Both models produce softmax probability vectors `[P(Real), P(Fake)]`. The ensemble computes a weighted average:
+Both models produce softmax probability vectors `[P(Real), P(Spoofed)]`. The ensemble computes a weighted average:
 
 ```
 ensemble_probs = w_resnet × resnet_probs + w_lstm × lstm_probs
 ```
 
-Default weights: `w_resnet = 0.5`, `w_lstm = 0.5` (configurable in `backend/config.py`).
+Weights can be learned automatically via `train_ensemble.py` or set manually in `backend/config.py`. If `models/ensemble_weights.json` exists, the backend loads it dynamically; otherwise it falls back to 50/50.
 
 ---
 
@@ -360,11 +337,10 @@ Upload an audio file and receive an ensemble prediction.
 
 ## Future Improvements
 
-- Add a third model (e.g., wav2vec2) for a stronger ensemble.
+- Add a third model (e.g., wav2vec2 / HuBERT) for a stronger ensemble.
 - Provide Grad-CAM visualizations on the spectrogram.
 - Deploy to cloud with Docker containerization.
 - Add user authentication and prediction history.
 - Support real-time microphone input.
-- Fine-tune ensemble weights using a validation set (learned fusion).
-- Add cross-dataset evaluation (ASVspoof, FakeAVCeleb).
+- Add cross-dataset evaluation (ASVspoof 2019, FakeAVCeleb).
 - Add adversarial robustness testing.

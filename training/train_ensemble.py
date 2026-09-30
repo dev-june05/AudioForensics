@@ -11,23 +11,20 @@ import json
 import logging
 import random
 import sys
-from functools import partial
 from pathlib import Path
 from typing import Dict, List
 
 import numpy as np
 import torch
 import torch.nn as nn
-from sklearn.model_selection import StratifiedShuffleSplit
 from torch.optim import Adam
-from torch.utils.data import DataLoader, Subset
+from torch.utils.data import DataLoader
 
-from dataset import AudioDataset, collate_variable_length
+from dataset import PartialSpoofDataset
 from model import AudioLSTM, AudioResNet
 
 TRAINING_DIR = Path(__file__).resolve().parent
 PROJECT_ROOT = TRAINING_DIR.parent
-DEFAULT_DATASET_ROOT = PROJECT_ROOT / "dataset"
 DEFAULT_MODELS_DIR = PROJECT_ROOT / "models"
 
 def setup_logging():
@@ -52,7 +49,8 @@ def _clean_state_dict(raw: dict) -> dict:
 
 def main():
     parser = argparse.ArgumentParser(description="Learn optimal ensemble weights.")
-    parser.add_argument("--dataset", type=str, default=str(DEFAULT_DATASET_ROOT))
+    parser.add_argument("--audio-dirs", nargs='+', required=True, help="Directories containing audio files")
+    parser.add_argument("--segment-labels", type=str, required=True, help="Path to segment labels .npy file")
     parser.add_argument("--models-dir", type=str, default=str(DEFAULT_MODELS_DIR))
     parser.add_argument("--val-split", type=float, default=0.2)
     parser.add_argument("--batch-size", type=int, default=16)
@@ -63,12 +61,7 @@ def main():
     logger = setup_logging()
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     
-    dataset_root = Path(args.dataset)
     models_dir = Path(args.models_dir)
-    train_dir = dataset_root / "train"
-    if not train_dir.exists():
-        train_dir = dataset_root
-
     resnet_path = models_dir / "resnet_audio_model.pth"
     lstm_path = models_dir / "lstm_audio_model.pth"
     
@@ -83,31 +76,34 @@ def main():
     torch.manual_seed(seed)
     
     logger.info("Loading validation datasets...")
-    # Get all labels
-    try:
-        dummy_dataset = AudioDataset(train_dir, mode="resnet", augment=False)
-    except Exception as e:
-        logger.error(f"Failed to load dataset: {e}")
-        return
-        
-    all_labels = dummy_dataset.get_labels()
-    
-    # Stratified split
-    splitter = StratifiedShuffleSplit(n_splits=1, test_size=args.val_split, random_state=seed)
-    _, val_indices = next(splitter.split(range(len(all_labels)), all_labels))
-    val_indices = val_indices.tolist()
+    # Split dataset cleanly on file IDs
+    labels_dict = np.load(args.segment_labels, allow_pickle=True).item()
+    all_files = list(labels_dict.keys())
+    random.shuffle(all_files)
 
-    # Create Subsets for validation
-    resnet_ds = Subset(AudioDataset(train_dir, mode="resnet", augment=False), val_indices)
-    lstm_ds = Subset(AudioDataset(train_dir, mode="lstm", augment=False), val_indices)
+    split_idx = int(len(all_files) * (1.0 - args.val_split))
+    val_files = all_files[split_idx:]
+
+    resnet_ds = PartialSpoofDataset(
+        audio_dirs=args.audio_dirs,
+        segment_labels_path=args.segment_labels,
+        mode="resnet",
+        augment=False,
+        file_list=val_files
+    )
+    lstm_ds = PartialSpoofDataset(
+        audio_dirs=args.audio_dirs,
+        segment_labels_path=args.segment_labels,
+        mode="lstm",
+        augment=False,
+        file_list=val_files
+    )
 
     resnet_loader = DataLoader(
-        resnet_ds, batch_size=args.batch_size, shuffle=False, 
-        collate_fn=partial(collate_variable_length, mode="resnet")
+        resnet_ds, batch_size=args.batch_size, shuffle=False
     )
     lstm_loader = DataLoader(
-        lstm_ds, batch_size=args.batch_size, shuffle=False,
-        collate_fn=partial(collate_variable_length, mode="lstm")
+        lstm_ds, batch_size=args.batch_size, shuffle=False
     )
 
     logger.info("Loading models...")
@@ -125,8 +121,7 @@ def main():
     labels_list = []
 
     with torch.no_grad():
-        for (r_batch, r_labels), (l_batch_data) in zip(resnet_loader, lstm_loader):
-            l_batch, l_labels, lengths = l_batch_data
+        for (r_batch, r_labels), (l_batch, l_labels) in zip(resnet_loader, lstm_loader):
             if not torch.equal(r_labels, l_labels):
                 logger.error("Label mismatch between resnet and lstm dataloaders!")
                 return
@@ -136,8 +131,7 @@ def main():
             resnet_logits_list.append(r_out)
 
             l_batch = l_batch.to(device)
-            lengths = lengths.to(device)
-            l_out = lstm(l_batch, lengths=lengths)
+            l_out = lstm(l_batch)
             lstm_logits_list.append(l_out)
 
             labels_list.append(r_labels.to(device))
