@@ -77,7 +77,16 @@ def main():
     
     logger.info("Loading validation datasets...")
     # Split dataset cleanly on file IDs
-    labels_dict = np.load(args.segment_labels, allow_pickle=True).item()
+    if str(args.segment_labels).endswith('.npy'):
+        labels_dict = np.load(args.segment_labels, allow_pickle=True).item()
+    else:
+        labels_dict = {}
+        with open(args.segment_labels, 'r') as f:
+            for line in f:
+                parts = line.strip().split()
+                if len(parts) >= 5:
+                    labels_dict[parts[1]] = 1
+                    
     all_files = list(labels_dict.keys())
     random.shuffle(all_files)
 

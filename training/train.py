@@ -242,7 +242,16 @@ def train(
     best_model_path = models_dir_path / MODEL_FILENAMES.get(architecture, f"{architecture}_model.pth")
 
     # Split dataset cleanly on file IDs
-    labels_dict = np.load(segment_labels, allow_pickle=True).item()
+    if str(segment_labels).endswith('.npy'):
+        labels_dict = np.load(segment_labels, allow_pickle=True).item()
+    else:
+        labels_dict = {}
+        with open(segment_labels, 'r') as f:
+            for line in f:
+                parts = line.strip().split()
+                if len(parts) >= 5:
+                    labels_dict[parts[1]] = 1
+                    
     all_files = list(labels_dict.keys())
     random.shuffle(all_files)
 
