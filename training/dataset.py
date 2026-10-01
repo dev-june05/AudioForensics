@@ -140,14 +140,19 @@ class PartialSpoofDataset(Dataset):
                                 key_idx = i
                                 break
                                 
-                        if key_idx != -1 and key_idx + 1 < len(parts):
-                            segments_str = parts[key_idx + 1:]
-                            # Handle both space-separated ['0', '1', '1'] and concatenated ['0110']
-                            if len(segments_str) == 1 and len(segments_str[0]) > 1:
-                                segments = list(segments_str[0])
+                        if key_idx != -1:
+                            if key_idx + 1 < len(parts):
+                                segments_str = parts[key_idx + 1:]
+                                # Handle both space-separated ['0', '1', '1'] and concatenated ['0110']
+                                if len(segments_str) == 1 and len(segments_str[0]) > 1:
+                                    segments = list(segments_str[0])
+                                else:
+                                    segments = segments_str
+                                raw_labels[file_id] = segments
                             else:
-                                segments = segments_str
-                            raw_labels[file_id] = segments
+                                # Utterance-level label only
+                                overall_label = '0' if parts[key_idx].lower() == 'spoof' else '1' # In original data 0=spoof, 1=bonafide
+                                raw_labels[file_id] = overall_label
             
             if not raw_labels:
                 raise ValueError(f"Could not parse any segment labels from {segment_labels_path}")
@@ -160,8 +165,9 @@ class PartialSpoofDataset(Dataset):
             self.labels_dict = raw_labels
 
         self.windows = []
+        import os
 
-        for file_id, segments in self.labels_dict.items():
+        for file_id, segments_or_label in self.labels_dict.items():
             audio_path = None
             for d in self.audio_dirs:
                 p_wav = d / f"{file_id}.wav"
@@ -176,7 +182,17 @@ class PartialSpoofDataset(Dataset):
             if audio_path is None:
                 continue
                 
-            total_duration_sec = len(segments) * self.resolution_sec
+            if isinstance(segments_or_label, list):
+                total_duration_sec = len(segments_or_label) * self.resolution_sec
+                segments = segments_or_label
+            else:
+                # Calculate duration from file size (assuming 16kHz 16-bit mono WAV)
+                file_size = os.path.getsize(audio_path)
+                num_samples = max(0, (file_size - 44) // 2)
+                total_duration_sec = num_samples / SAMPLE_RATE
+                num_segments = max(1, int(np.ceil(total_duration_sec / self.resolution_sec)))
+                segments = [segments_or_label] * num_segments
+
             total_samples = int(total_duration_sec * SAMPLE_RATE)
             
             # Divide into 30s windows
