@@ -92,7 +92,8 @@ def run_epoch_train(
     correct = 0
     total = 0
 
-    for inputs, labels in loader:
+    from tqdm import tqdm
+    for inputs, labels in tqdm(loader, desc="Training", leave=False):
         inputs = inputs.to(device)
         labels = labels.to(device)
         optimizer.zero_grad()
@@ -122,8 +123,9 @@ def run_epoch_val(
     correct = 0
     total = 0
 
+    from tqdm import tqdm
     with torch.no_grad():
-        for inputs, labels in loader:
+        for inputs, labels in tqdm(loader, desc="Validation", leave=False):
             inputs = inputs.to(device)
             labels = labels.to(device)
             outputs = model(inputs)
