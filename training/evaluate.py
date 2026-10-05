@@ -49,7 +49,7 @@ from torch.utils.data import DataLoader
 from tqdm import tqdm
 
 from dataset import PartialSpoofDataset
-from model import AudioLSTM, AudioResNet
+from model import AudioLSTM, AudioResNet, AudioWav2Vec2, AudioHuBERT
 
 # ---------------------------------------------------------------------------
 # Paths and defaults
@@ -119,6 +119,10 @@ def load_model(architecture: str, model_path: Path, device: torch.device) -> tor
         model = AudioResNet(num_classes=2, pretrained=False)
     elif architecture == "lstm":
         model = AudioLSTM(num_classes=2)
+    elif architecture == "wav2vec2":
+        model = AudioWav2Vec2(num_classes=2)
+    elif architecture == "hubert":
+        model = AudioHuBERT(num_classes=2)
     else:
         raise ValueError(f"Unknown architecture: {architecture}")
     
@@ -299,10 +303,11 @@ def evaluate_single_model(
     
     # Load dataset
     logger.info("Loading evaluation dataset...")
+    dataset_mode = "raw" if architecture in ["wav2vec2", "hubert"] else architecture
     dataset = PartialSpoofDataset(
         audio_dirs=[Path(d) for d in audio_dirs],
         segment_labels_path=segment_labels,
-        mode=architecture,
+        mode=dataset_mode,
         augment=False,
     )
     logger.info("Total evaluation windows: %d", len(dataset))
