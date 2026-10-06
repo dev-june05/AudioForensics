@@ -1,13 +1,17 @@
 """
 Model definitions for audio deepfake detection (training).
 
-Contains two architectures:
-  1. AudioResNet  — ResNet-18 with ImageNet transfer learning, adapted for
-                    1-channel mel-spectrograms of *any* spatial size.
-  2. AudioLSTM    — Bidirectional LSTM with attention-weighted pooling for
-                    variable-length temporal mel-spectrogram sequences.
+Contains four architectures:
+  1. AudioResNet   — ResNet-18 with ImageNet transfer learning, adapted for
+                     1-channel mel-spectrograms of *any* spatial size.
+  2. AudioLSTM     — Bidirectional LSTM with attention-weighted pooling for
+                     variable-length temporal mel-spectrogram sequences.
+  3. AudioWav2Vec2 — Fine-tuned wav2vec 2.0 (facebook/wav2vec2-base) operating
+                     directly on raw 16 kHz waveforms.
+  4. AudioHuBERT   — Fine-tuned HuBERT (facebook/hubert-base-ls960) operating
+                     directly on raw 16 kHz waveforms.
 
-Both output 2 logits: index 0 → Real, index 1 → AI Generated.
+All output 2 logits: index 0 → Real, index 1 → AI Generated.
 """
 
 from __future__ import annotations
@@ -183,3 +187,180 @@ class AudioLSTM(nn.Module):
         # Classify
         logits = self.classifier(context)  # (batch, num_classes)
         return logits
+
+
+# ---------------------------------------------------------------------------
+# 3. Wav2Vec 2.0 for raw waveform classification
+# ---------------------------------------------------------------------------
+
+class AudioWav2Vec2(nn.Module):
+    """
+    Fine-tuned wav2vec 2.0 for binary audio deepfake classification.
+
+    Operates directly on raw 16 kHz waveforms — no mel-spectrogram needed.
+    The model learns acoustic representations from the waveform that capture
+    vocoder artifacts, phase discontinuities, and unnatural prosody that
+    hand-crafted features (like mel-spectrograms) may miss.
+
+    Architecture:
+      - CNN Feature Extractor (FROZEN): Converts raw waveform to latent
+        speech representations (~50 Hz frame rate, i.e. one frame per 20ms).
+        Frozen because these low-level features generalize well.
+      - Transformer Encoder (FINE-TUNED): 12 transformer layers that learn
+        contextual representations. Fine-tuned to detect deepfake patterns.
+      - Attention Pooling + Classifier Head (TRAINED FROM SCRATCH):
+        Pools the variable-length transformer outputs into a fixed vector
+        and classifies as Real vs Spoofed.
+
+    Why attention pooling?
+      A 30-second clip produces ~1500 transformer frames. If only part of
+      the audio is fake, mean pooling dilutes the signal. Attention pooling
+      lets the model focus on the suspicious frames.
+
+    Input:  (batch, num_samples) — raw waveform, e.g. (B, 480000) for 30s
+    Output: (batch, 2)           — classification logits
+    """
+
+    PRETRAINED_NAME = "facebook/wav2vec2-base"
+
+    def __init__(
+        self,
+        num_classes: int = 2,
+        model_name: str | None = None,
+        dropout: float = 0.1,
+    ) -> None:
+        super().__init__()
+        from transformers import Wav2Vec2Model
+
+        name = model_name or self.PRETRAINED_NAME
+        self.wav2vec2 = Wav2Vec2Model.from_pretrained(name)
+
+        # Freeze the CNN feature extractor — these low-level features
+        # are already excellent and don't need fine-tuning.
+        self.wav2vec2.feature_extractor._freeze_parameters()
+
+        hidden_size = self.wav2vec2.config.hidden_size  # 768 for base
+
+        # Attention pooling (same design philosophy as AudioLSTM)
+        self.attention = nn.Sequential(
+            nn.Linear(hidden_size, 128),
+            nn.Tanh(),
+            nn.Linear(128, 1),
+        )
+
+        # Classifier head
+        self.classifier = nn.Sequential(
+            nn.LayerNorm(hidden_size),
+            nn.Dropout(dropout),
+            nn.Linear(hidden_size, 256),
+            nn.GELU(),
+            nn.Dropout(dropout),
+            nn.Linear(256, num_classes),
+        )
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        """
+        Args:
+            x: (batch, num_samples) — raw 16 kHz waveform.
+        Returns:
+            (batch, num_classes) logits.
+        """
+        # Normalize waveform (zero mean, unit variance per sample)
+        x = (x - x.mean(dim=-1, keepdim=True)) / (x.std(dim=-1, keepdim=True) + 1e-7)
+
+        # Extract contextual representations
+        outputs = self.wav2vec2(x)
+        hidden_states = outputs.last_hidden_state  # (batch, seq_len, hidden_size)
+
+        # Attention-weighted pooling
+        attn_scores = self.attention(hidden_states).squeeze(-1)  # (batch, seq_len)
+        attn_weights = torch.softmax(attn_scores, dim=1)         # (batch, seq_len)
+        context = torch.bmm(
+            attn_weights.unsqueeze(1),  # (batch, 1, seq_len)
+            hidden_states,              # (batch, seq_len, hidden_size)
+        ).squeeze(1)                    # (batch, hidden_size)
+
+        return self.classifier(context)
+
+
+# ---------------------------------------------------------------------------
+# 4. HuBERT for raw waveform classification
+# ---------------------------------------------------------------------------
+
+class AudioHuBERT(nn.Module):
+    """
+    Fine-tuned HuBERT for binary audio deepfake classification.
+
+    HuBERT (Hidden-Unit BERT) learns speech representations via an offline
+    clustering step followed by a BERT-like masked prediction objective.
+    This gives it particularly strong phoneme-level representations, making
+    it excellent at detecting partially spoofed audio where only certain
+    phonemes or words have been replaced.
+
+    Architecture is identical to AudioWav2Vec2 (frozen CNN + fine-tuned
+    transformer + attention pooling + classifier), but uses the HuBERT
+    backbone instead of wav2vec 2.0.
+
+    Input:  (batch, num_samples) — raw waveform, e.g. (B, 480000) for 30s
+    Output: (batch, 2)           — classification logits
+    """
+
+    PRETRAINED_NAME = "facebook/hubert-base-ls960"
+
+    def __init__(
+        self,
+        num_classes: int = 2,
+        model_name: str | None = None,
+        dropout: float = 0.1,
+    ) -> None:
+        super().__init__()
+        from transformers import HubertModel
+
+        name = model_name or self.PRETRAINED_NAME
+        self.hubert = HubertModel.from_pretrained(name)
+
+        # Freeze the CNN feature extractor
+        self.hubert.feature_extractor._freeze_parameters()
+
+        hidden_size = self.hubert.config.hidden_size  # 768 for base
+
+        # Attention pooling
+        self.attention = nn.Sequential(
+            nn.Linear(hidden_size, 128),
+            nn.Tanh(),
+            nn.Linear(128, 1),
+        )
+
+        # Classifier head
+        self.classifier = nn.Sequential(
+            nn.LayerNorm(hidden_size),
+            nn.Dropout(dropout),
+            nn.Linear(hidden_size, 256),
+            nn.GELU(),
+            nn.Dropout(dropout),
+            nn.Linear(256, num_classes),
+        )
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        """
+        Args:
+            x: (batch, num_samples) — raw 16 kHz waveform.
+        Returns:
+            (batch, num_classes) logits.
+        """
+        # Normalize waveform
+        x = (x - x.mean(dim=-1, keepdim=True)) / (x.std(dim=-1, keepdim=True) + 1e-7)
+
+        # Extract contextual representations
+        outputs = self.hubert(x)
+        hidden_states = outputs.last_hidden_state  # (batch, seq_len, hidden_size)
+
+        # Attention-weighted pooling
+        attn_scores = self.attention(hidden_states).squeeze(-1)
+        attn_weights = torch.softmax(attn_scores, dim=1)
+        context = torch.bmm(
+            attn_weights.unsqueeze(1),
+            hidden_states,
+        ).squeeze(1)
+
+        return self.classifier(context)

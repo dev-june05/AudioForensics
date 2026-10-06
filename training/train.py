@@ -215,8 +215,12 @@ def _build_model(architecture: str) -> torch.nn.Module:
         return AudioResNet(num_classes=2, pretrained=True)
     elif architecture == "lstm":
         return AudioLSTM(num_classes=2)
-    elif architecture in ["wav2vec2", "hubert"]:
-        raise NotImplementedError(f"{architecture} model definition not yet implemented in model.py")
+    elif architecture == "wav2vec2":
+        from model import AudioWav2Vec2
+        return AudioWav2Vec2(num_classes=2)
+    elif architecture == "hubert":
+        from model import AudioHuBERT
+        return AudioHuBERT(num_classes=2)
     else:
         raise ValueError(f"Unknown architecture: {architecture}")
 
