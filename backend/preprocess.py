@@ -188,6 +188,7 @@ def _waveform_to_windows(y: np.ndarray) -> List[WindowData]:
 
 import os
 import tempfile
+from pathlib import Path
 
 def preprocess_audio(file: Union[BinaryIO, bytes, str], filename: Optional[str] = None) -> List[WindowData]:
     """
@@ -200,8 +201,8 @@ def preprocess_audio(file: Union[BinaryIO, bytes, str], filename: Optional[str] 
             y, _ = librosa.load(file, sr=SAMPLE_RATE, mono=True)
             return _waveform_to_windows(y)
         
-        # Write to temporary file with correct extension so librosa / soundfile / audioread can parse it
-        ext = Path(filename).suffix.lower() if filename else ".wav"
+        # Determine file extension safely
+        ext = os.path.splitext(filename)[1].lower() if filename else ".wav"
         if not ext:
             ext = ".wav"
             
@@ -212,7 +213,9 @@ def preprocess_audio(file: Union[BinaryIO, bytes, str], filename: Optional[str] 
             elif hasattr(file, "read"):
                 raw = file.read()
                 tmp.write(raw if isinstance(raw, bytes) else raw.encode("utf-8"))
+            tmp.flush()
         
+        # Load audio (file is now closed on Windows, allowing librosa / soundfile to open it)
         y, _ = librosa.load(tmp_path, sr=SAMPLE_RATE, mono=True)
         return _waveform_to_windows(y)
     except Exception as e:
