@@ -167,7 +167,7 @@ async def predict_endpoint(file: UploadFile = File(..., description="Audio file 
     try:
         # ----- Step 2 & 3: Preprocess -----
         logger.debug("Preprocessing audio from %s (%d bytes)", filename, file_size)
-        windows = preprocess_audio(file_like)
+        windows = preprocess_audio(file_like, filename=filename)
 
         # ----- Step 4, 5, 6: Ensemble inference -----
         status = models_loaded()
@@ -183,7 +183,9 @@ async def predict_endpoint(file: UploadFile = File(..., description="Audio file 
             "overall_status": result.overall_status,
             "overall_ai_probability": result.overall_ai_probability,
             "total_duration_sec": result.total_duration_sec,
+            "filename": filename,
             "confidence_threshold": 0.70,
+            "models_available": models_loaded(),
             "windows": [
                 {
                     "start_time_sec": w.start_time_sec,

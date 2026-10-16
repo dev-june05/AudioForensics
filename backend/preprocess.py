@@ -186,21 +186,41 @@ def _waveform_to_windows(y: np.ndarray) -> List[WindowData]:
     return windows
 
 
-def preprocess_audio(file: Union[BinaryIO, bytes, str]) -> List[WindowData]:
+import os
+import tempfile
+
+def preprocess_audio(file: Union[BinaryIO, bytes, str], filename: Optional[str] = None) -> List[WindowData]:
     """
     Preprocess an audio source and return a list of WindowData.
+    Supports .wav, .mp3, .m4a, .flac, .ogg, .webm, .aac, etc.
     """
+    tmp_path = None
     try:
-        if isinstance(file, bytes):
-            file = io.BytesIO(file)
-        elif isinstance(file, str):
+        if isinstance(file, str) and os.path.exists(file):
             y, _ = librosa.load(file, sr=SAMPLE_RATE, mono=True)
             return _waveform_to_windows(y)
-    
-        raw = file.read() if hasattr(file, "read") else file
-        if isinstance(raw, bytes):
-            file = io.BytesIO(raw)
-        y, _ = librosa.load(file, sr=SAMPLE_RATE, mono=True)
+        
+        # Write to temporary file with correct extension so librosa / soundfile / audioread can parse it
+        ext = Path(filename).suffix.lower() if filename else ".wav"
+        if not ext:
+            ext = ".wav"
+            
+        with tempfile.NamedTemporaryFile(delete=False, suffix=ext) as tmp:
+            tmp_path = tmp.name
+            if isinstance(file, bytes):
+                tmp.write(file)
+            elif hasattr(file, "read"):
+                raw = file.read()
+                tmp.write(raw if isinstance(raw, bytes) else raw.encode("utf-8"))
+        
+        y, _ = librosa.load(tmp_path, sr=SAMPLE_RATE, mono=True)
         return _waveform_to_windows(y)
     except Exception as e:
-        raise ValueError(f"Could not decode audio file. ({str(e)})")
+        clean_name = filename or "audio file"
+        raise ValueError(f"Could not decode {clean_name}: {str(e)}")
+    finally:
+        if tmp_path and os.path.exists(tmp_path):
+            try:
+                os.remove(tmp_path)
+            except Exception:
+                pass

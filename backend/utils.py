@@ -34,8 +34,10 @@ DEFAULT_PORT = 8000
 CORS_ORIGINS = ["http://localhost:5173"]
 
 # File upload validation
-MAX_UPLOAD_BYTES = 50 * 1024 * 1024  # 50 MB
-ALLOWED_AUDIO_EXTENSIONS = {".wav", ".mp3", ".flac", ".ogg", ".m4a", ".webm"}
+MAX_UPLOAD_BYTES = 100 * 1024 * 1024  # 100 MB
+ALLOWED_AUDIO_EXTENSIONS = {
+    ".wav", ".mp3", ".flac", ".ogg", ".m4a", ".webm", ".aac", ".opus", ".wma"
+}
 ALLOWED_CONTENT_TYPES = {
     "audio/wav",
     "audio/x-wav",
@@ -45,6 +47,9 @@ ALLOWED_CONTENT_TYPES = {
     "audio/flac",
     "audio/ogg",
     "audio/x-m4a",
+    "audio/m4a",
+    "audio/aac",
+    "audio/opus",
     "audio/webm",
     "application/octet-stream",  # some clients send this for binary uploads
 }
