@@ -204,7 +204,10 @@ def load_lstm(path: str) -> nn.Module:
     state_dict = _clean_state_dict(checkpoint)
 
     model = _AudioLSTM()
-    model.load_state_dict(state_dict)
+    try:
+        model.load_state_dict(state_dict)
+    except RuntimeError:
+        model.load_state_dict(state_dict, strict=False)
     model.to(DEVICE).eval()
     _LSTM_MODEL = model
     return _LSTM_MODEL
@@ -255,12 +258,18 @@ def predict(windows: List[WindowData]) -> FilePrediction:
         lstm_probs = None
 
         if _RESNET_MODEL is not None and w.resnet_tensor is not None:
-            batch = w.resnet_tensor.unsqueeze(0).to(DEVICE)
+            batch = w.resnet_tensor.to(DEVICE)
+            if batch.dim() == 3:
+                batch = batch.unsqueeze(0)
             logits = _RESNET_MODEL(batch)
             resnet_probs = torch.softmax(logits, dim=1).squeeze(0)
 
         if _LSTM_MODEL is not None and w.lstm_tensor is not None:
-            batch = w.lstm_tensor.unsqueeze(0).to(DEVICE)
+            batch = w.lstm_tensor.to(DEVICE)
+            if batch.dim() == 2:
+                batch = batch.unsqueeze(0)
+            elif batch.dim() == 4 and batch.size(1) == 1:
+                batch = batch.squeeze(1)
             seq_len = batch.size(1)
             lengths = torch.tensor([seq_len], device=DEVICE)
             logits = _LSTM_MODEL(batch, lengths=lengths)
