@@ -1,0 +1,14 @@
+{
+    "architecture": "resnet",
+    "accuracy": 0.961841893414909,
+    "precision": 0.9602948806341703,
+    "recall": 0.961841893414909,
+    "f1": 0.959927476374683,
+    "eer": 0.05489897167776607,
+    "eer_threshold": 0.9962871074676514,
+    "total_windows": 24844,
+    "class_distribution": {
+        "real": 2548,
+        "spoofed": 22296
+    }
+}

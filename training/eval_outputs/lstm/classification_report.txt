@@ -1,0 +1,18 @@
+Model: LSTM
+Model File: /home/24guptad/AudioForensics/models/lstm_audio_model.pth
+Evaluation Windows: 24844
+==================================================
+
+              precision    recall  f1-score   support
+
+        Real       0.79      0.67      0.72      2548
+     Spoofed       0.96      0.98      0.97     22296
+
+    accuracy                           0.95     24844
+   macro avg       0.88      0.82      0.85     24844
+weighted avg       0.94      0.95      0.95     24844
+
+==================================================
+Overall Accuracy: 0.9474 (94.74%)
+Equal Error Rate (EER): 0.0785 (7.85%)
+EER Threshold: 0.9488

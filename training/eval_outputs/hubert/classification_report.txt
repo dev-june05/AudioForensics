@@ -1,0 +1,18 @@
+Model: HUBERT
+Model File: /home/24guptad/AudioForensics/models/hubert_audio_model.pth
+Evaluation Windows: 24844
+==================================================
+
+              precision    recall  f1-score   support
+
+        Real       0.78      0.99      0.87      2548
+     Spoofed       1.00      0.97      0.98     22296
+
+    accuracy                           0.97     24844
+   macro avg       0.89      0.98      0.93     24844
+weighted avg       0.98      0.97      0.97     24844
+
+==================================================
+Overall Accuracy: 0.9692 (96.92%)
+Equal Error Rate (EER): 0.0250 (2.50%)
+EER Threshold: 0.1387

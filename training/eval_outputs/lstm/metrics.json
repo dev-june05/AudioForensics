@@ -1,0 +1,14 @@
+{
+    "architecture": "lstm",
+    "accuracy": 0.9473917243600064,
+    "precision": 0.9446205930563369,
+    "recall": 0.9473917243600064,
+    "f1": 0.9454124863105116,
+    "eer": 0.07853602648312782,
+    "eer_threshold": 0.9488215446472168,
+    "total_windows": 24844,
+    "class_distribution": {
+        "real": 2548,
+        "spoofed": 22296
+    }
+}

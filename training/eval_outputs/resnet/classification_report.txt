@@ -1,0 +1,18 @@
+Model: RESNET
+Model File: /home/24guptad/AudioForensics/models/resnet_audio_model.pth
+Evaluation Windows: 24844
+==================================================
+
+              precision    recall  f1-score   support
+
+        Real       0.89      0.71      0.79      2548
+     Spoofed       0.97      0.99      0.98     22296
+
+    accuracy                           0.96     24844
+   macro avg       0.93      0.85      0.89     24844
+weighted avg       0.96      0.96      0.96     24844
+
+==================================================
+Overall Accuracy: 0.9618 (96.18%)
+Equal Error Rate (EER): 0.0549 (5.49%)
+EER Threshold: 0.9963

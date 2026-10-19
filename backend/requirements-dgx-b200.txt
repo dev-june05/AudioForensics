@@ -1,0 +1,79 @@
+# =============================================================================
+# AudioForensics — backend/requirements.txt
+# Locked for: DGX B200 lab server | CUDA 12.8 (preinstalled) | driver 570.211.01
+# =============================================================================
+#
+# DO NOT run a plain `pip install torch torchvision` on this server.
+# torch is ALREADY installed system-wide as 2.11.0+cu128 — matching the
+# preinstalled CUDA 12.8 driver on this DGX B200. Reinstalling it (even to
+# "the same" version from a different index) risks pip silently pulling a
+# CPU-only wheel or a mismatched CUDA build, which breaks GPU access.
+#
+# Verify before installing anything:
+#   python3 -c "import torch; print(torch.__version__, torch.cuda.is_available())"
+#   -> should print: 2.11.0+cu128 True
+#
+# If that already prints correctly, SKIP installing torch/torchvision
+# entirely and only install the packages below.
+# =============================================================================
+
+# --- Web framework / API layer ---
+fastapi==0.141.1
+uvicorn[standard]==0.52.4
+pydantic==2.13.4
+python-multipart==0.0.32
+
+# --- Deep learning (DO NOT INSTALL — already present, listed for reference only) ---
+# torch==2.11.0+cu128        # ALREADY INSTALLED — do not touch
+# torchvision==0.26.0+cu128  # matching pair for torch 2.11.0 (confirmed via
+#                             # PyTorch's official 2.11.0 release announcement).
+#                             # Install ONLY if `import torchvision` fails — see
+#                             # command at the bottom of this file. Never a bare
+#                             # `pip install torchvision`.
+
+# --- Audio / signal processing ---
+librosa==0.11.0            # 0.11.0 confirmed stable release; verify with
+                            # `pip index versions librosa` before install — a
+                            # librosa 1.x exists on PyPI but is unverified
+                            # against this project's preprocess.py API usage
+scipy==1.18.1
+numpy==2.4.4               # pinned to match your installed NumPy exactly — do not change
+
+# --- Computer vision / spectrogram image handling ---
+opencv-python==4.12.0.88   # pinned to the 4.x series deliberately — opencv-python
+                            # 5.x is now on PyPI but is a major version bump that
+                            # may break this project's cv2 API calls; do not
+                            # jump to 5.x without testing preprocess.py first
+matplotlib==3.11.1
+
+# --- Classical ML utilities (used for metrics/eval, not the core models) ---
+scikit-learn==1.9.0
+
+# =============================================================================
+# Install instructions
+# =============================================================================
+#
+# 1) Confirm torch/CUDA are intact first (see command above).
+#
+# 2) Install everything EXCEPT torch/torchvision normally:
+#      pip install -r requirements-dgx-b200.txt --no-deps
+#
+#    The --no-deps flag is intentional: several of these packages (opencv-python,
+#    scikit-learn, librosa) list "torch" or "numpy" as loose/unpinned deps in
+#    their own metadata. Without --no-deps, pip may try to "resolve" a newer
+#    torch or a different numpy and silently upgrade something you don't want
+#    touched. After the --no-deps install, run step 3 to catch anything missing.
+#
+# 3) Sanity-check nothing was skipped that you actually need:
+#      pip check
+#
+#    If pip check complains about a genuinely missing package (not torch/numpy),
+#    install that one specific package by name, e.g.:
+#      pip install <package-name>==<version> --no-deps
+#
+# 4) ONLY IF `import torchvision` fails (it likely won't, since it's commonly
+#    bundled alongside a matching torch install already) — install the exact
+#    matching build, pinned to the CUDA 12.8 wheel index, never plain PyPI:
+#      pip install torchvision==0.26.0 --index-url https://download.pytorch.org/whl/cu128 --no-deps
+#
+# =============================================================================

@@ -1,0 +1,18 @@
+Model: WAV2VEC2
+Model File: /home/24guptad/AudioForensics/models/wav2vec2_audio_model.pth
+Evaluation Windows: 24844
+==================================================
+
+              precision    recall  f1-score   support
+
+        Real       0.95      0.93      0.94      2548
+     Spoofed       0.99      0.99      0.99     22296
+
+    accuracy                           0.99     24844
+   macro avg       0.97      0.96      0.97     24844
+weighted avg       0.99      0.99      0.99     24844
+
+==================================================
+Overall Accuracy: 0.9878 (98.78%)
+Equal Error Rate (EER): 0.0137 (1.37%)
+EER Threshold: 0.9889

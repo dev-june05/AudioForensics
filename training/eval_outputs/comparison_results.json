@@ -1,0 +1,58 @@
+{
+    "resnet": {
+        "architecture": "resnet",
+        "accuracy": 0.961841893414909,
+        "precision": 0.9602948806341703,
+        "recall": 0.961841893414909,
+        "f1": 0.959927476374683,
+        "eer": 0.05489897167776607,
+        "eer_threshold": 0.9962871074676514,
+        "total_windows": 24844,
+        "class_distribution": {
+            "real": 2548,
+            "spoofed": 22296
+        }
+    },
+    "lstm": {
+        "architecture": "lstm",
+        "accuracy": 0.9473917243600064,
+        "precision": 0.9446205930563369,
+        "recall": 0.9473917243600064,
+        "f1": 0.9454124863105116,
+        "eer": 0.07853602648312782,
+        "eer_threshold": 0.9488215446472168,
+        "total_windows": 24844,
+        "class_distribution": {
+            "real": 2548,
+            "spoofed": 22296
+        }
+    },
+    "wav2vec2": {
+        "architecture": "wav2vec2",
+        "accuracy": 0.9878441474802769,
+        "precision": 0.9877319289069968,
+        "recall": 0.9878441474802769,
+        "f1": 0.9877646577828353,
+        "eer": 0.013707923759054021,
+        "eer_threshold": 0.9888540506362915,
+        "total_windows": 24844,
+        "class_distribution": {
+            "real": 2548,
+            "spoofed": 22296
+        }
+    },
+    "hubert": {
+        "architecture": "hubert",
+        "accuracy": 0.9692078570278538,
+        "precision": 0.9753876684491405,
+        "recall": 0.9692078570278538,
+        "f1": 0.9707999252929553,
+        "eer": 0.025049899482853494,
+        "eer_threshold": 0.13866019248962402,
+        "total_windows": 24844,
+        "class_distribution": {
+            "real": 2548,
+            "spoofed": 22296
+        }
+    }
+}

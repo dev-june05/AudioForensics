@@ -1,0 +1,14 @@
+{
+    "architecture": "hubert",
+    "accuracy": 0.9692078570278538,
+    "precision": 0.9753876684491405,
+    "recall": 0.9692078570278538,
+    "f1": 0.9707999252929553,
+    "eer": 0.025049899482853494,
+    "eer_threshold": 0.13866019248962402,
+    "total_windows": 24844,
+    "class_distribution": {
+        "real": 2548,
+        "spoofed": 22296
+    }
+}

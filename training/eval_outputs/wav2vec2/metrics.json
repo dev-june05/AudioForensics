@@ -1,0 +1,14 @@
+{
+    "architecture": "wav2vec2",
+    "accuracy": 0.9878441474802769,
+    "precision": 0.9877319289069968,
+    "recall": 0.9878441474802769,
+    "f1": 0.9877646577828353,
+    "eer": 0.013707923759054021,
+    "eer_threshold": 0.9888540506362915,
+    "total_windows": 24844,
+    "class_distribution": {
+        "real": 2548,
+        "spoofed": 22296
+    }
+}
